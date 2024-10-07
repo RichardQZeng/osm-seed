@@ -7,31 +7,25 @@
 osmSeedVersion: develop-9302179
 environment: development
 # cloudProvider is provider where you are going to deploy osm-seed, it could be: aws, gcp, azure, minikube
-cloudProvider: minikube
-
+cloudProvider: aws
 # ====================================================================================================
 # AWS: In case you are using the cloudProvider=aws set the below variables, We are assuming the nodes has a policies access to S3
 # ====================================================================================================
 AWS_S3_BUCKET: s3://osm-seed
-
 # ====================================================================================================
 # GCP: In case you are using the cloudProvider=gcp set the below variables, We are assuming the nodes has a policies to upload files to cloud storage
 # ====================================================================================================
 GCP_STORAGE_BUCKET: gs://osm-seed-test
-
 # ====================================================================================================
 # AZURE: In case you are using the cloudProvider=azure set the below variables
 # ====================================================================================================
 AZURE_STORAGE_ACCOUNT: osmseed
 AZURE_CONTAINER_NAME: osm-seed
 AZURE_STORAGE_CONNECTION_STRING: xyz..
-
 # ====================================================
 # AWS: Specify ARN for SSL certificate, currently assumes a single wildcard cert
 # ====================================================
-
 AWS_SSL_ARN: false
-
 # Specify serviceType.
 #
 # serviceType can be one of three values: 'NodePort', 'ClusterIP' or 'LoadBalancer'
@@ -46,8 +40,8 @@ AWS_SSL_ARN: false
 # as the SSL certificate for your services. Else, you will need to configure
 # SSL separately.
 # serviceType: NodePort
-serviceType: LoadBalancer
-
+serviceType: ClusterIP
+createClusterIssuer: false
 # Domain that is pointed to the clusterIP
 # You will need to create an A record like *.osmseed.example.com pointed to the ClusterIP
 # Then, the cluster configuration will setup services at their respective subdomains:
@@ -55,16 +49,14 @@ serviceType: LoadBalancer
 # - overpass.osmseed.example.com
 # - nominatim.osmseed.example.com
 # - etc.
-domain: osmseed.example.com
-
+domain: dev.osmseed.org
 # ====================================================================================================
 # Configuration for Lets Encrypt setup
 # ====================================================================================================
 
 # Admin Email address used when generating Lets Encrypt certificates.
 # You will be notified of expirations, etc. on this email address.
-adminEmail: admin@example.com
-
+adminEmail: admin@osmseed.org
 # ====================================================================================================
 # ====================================================================================================
 # ==================================Pods Configurations===============================================
@@ -83,6 +75,7 @@ db:
     POSTGRES_DB: openstreetmap
     POSTGRES_USER: postgres
     POSTGRES_PASSWORD: "1234"
+    ENVIRONMENT: "production"
   persistenceDisk:
     enabled: false
     mountPath: /var/lib/postgresql/data
@@ -91,8 +84,8 @@ db:
     localVolumeHostPath: /mnt/db-data
     localVolumeSize: 10Gi
     # AWS
-    AWS_ElasticBlockStore_volumeID: vol-1234bcd
-    AWS_ElasticBlockStore_size: 500Gi
+    AWS_ElasticBlockStore_volumeID: vol-06a278f66b15d4b3c
+    AWS_ElasticBlockStore_size: 50Gi
     # GCP
     GCP_gcePersistentDisk_pdName: osmseed-disk-db-v1
     GCP_gcePersistentDisk_size: 50Gi
@@ -111,6 +104,27 @@ db:
   nodeSelector:
     enabled: false
   sharedMemorySize: 64Mi
+  # To use postgresqlConfig, you need to have already $PGDATA set up
+  postgresqlConfig:
+    enabled: false
+    values: |
+      listen_addresses = '*'
+      max_connections = 100
+      shared_buffers = 128MB
+      effective_cache_size = 256MB
+      maintenance_work_mem = 64MB
+      checkpoint_completion_target = 0.7
+      wal_buffers = 16MB
+      default_statistics_target = 100
+      random_page_cost = 1.1
+      effective_io_concurrency = 200
+      work_mem = 4MB
+      min_wal_size = 80MB
+      max_wal_size = 1GB
+      max_worker_processes = 4
+      max_parallel_workers_per_gather = 2
+      max_parallel_workers = 4
+  
 # ====================================================================================================
 # Variables for osm-seed website
 # ====================================================================================================
@@ -120,6 +134,7 @@ web:
     name: ""
     tag: ""
   replicaCount: 1
+  ingressDomain: www.dev.osmseed.org
   serviceAnnotations: {}
   env:
     MAILER_ADDRESS: smtp.gmail.com
@@ -132,6 +147,10 @@ web:
     OVERPASS_URL: "overpassApi"
     OAUTH_CLIENT_ID: "abcd" # Create client ID and key as OAuth2 Application
     OAUTH_KEY: "xyz"
+    ORGANIZATION_NAME: "OSMSeed"
+    WEBSITE_STATUS: "online"
+    API_TIMEOUT: 30
+    WEB_TIMEOUT: 30
   resources:
     enabled: false
     requests:
@@ -166,13 +185,11 @@ memcached:
     limits:
       memory: "8Gi"
       cpu: "2"
-
 # ====================================================================================================
 # Variables for id-editor
 # ====================================================================================================
 idEditor:
   enabled: false
-
 # ====================================================================================================
 # Variables for full-history container
 # ====================================================================================================
@@ -196,64 +213,62 @@ fullHistory:
     limits:
       memory: "16Gi"
       cpu: "4"
-
-  # ====================================================================================================
-  # Variables for osm-seed database backup and restore
-  # ====================================================================================================
+      # ====================================================================================================
+      # Variables for osm-seed database backup and restore
+      # ====================================================================================================
 dbBackupRestore:
   image:
     name: "developmentseed/osmseed-backup-restore"
     tag: "0.1.0-0.dev.git.942.h994af82"
   cronjobs:
-  - name: web-db
-    enabled: false
-    schedule: "* * * * *"
-    env:
-      # DB action: backup/restore
-      DB_ACTION: backup
-      # Naming backup files
-      SET_DATE_AT_NAME: true
-      BACKUP_CLOUD_FOLDER: database/web-db
-      BACKUP_CLOUD_FILE: osmseed-api-web-db
-      AWS_S3_BUCKET: secure-bucket
-      # Clean up backups options
-      CLEANUP_BACKUPS: true
-      RETENTION_DAYS: "30"
-    resources:
+    - name: web-db
       enabled: false
-      requests:
-        memory: "300Mi"
-        cpu: "0.5"
-      limits:
-        memory: "400Mi"
-        cpu: "0.6"
-    nodeSelector:
+      schedule: "* * * * *"
+      env:
+        # DB action: backup/restore
+        DB_ACTION: backup
+        # Naming backup files
+        SET_DATE_AT_NAME: true
+        BACKUP_CLOUD_FOLDER: database/web-db
+        BACKUP_CLOUD_FILE: osmseed-api-web-db
+        AWS_S3_BUCKET: secure-bucket
+        # Clean up backups options
+        CLEANUP_BACKUPS: true
+        RETENTION_DAYS: "30"
+      resources:
+        enabled: false
+        requests:
+          memory: "300Mi"
+          cpu: "0.5"
+        limits:
+          memory: "400Mi"
+          cpu: "0.6"
+      nodeSelector:
+        enabled: false
+    - name: osmcha-db
       enabled: false
-  - name: osmcha-db
-    enabled: false
-    schedule: "* * * * *"
-    env:
-      # DB action: backup/restore
-      DB_ACTION: backup
-      # Naming backup files
-      SET_DATE_AT_NAME: true
-      BACKUP_CLOUD_FOLDER: database/osmcha-db
-      BACKUP_CLOUD_FILE: osmseed-osmcha-db
-      AWS_S3_BUCKET: secure-bucket
-      # Clean up backups options
-      CLEANUP_BACKUPS: true
-      RETENTION_DAYS: "30"
-    resources:
-      enabled: false
-      requests:
-        memory: "300Mi"
-        cpu: "0.5"
-      limits:
-        memory: "400Mi"
-        cpu: "0.6"
-    nodeSelector:
-      enabled: false
-
+      schedule: "* * * * *"
+      env:
+        # DB action: backup/restore
+        DB_ACTION: backup
+        # Naming backup files
+        SET_DATE_AT_NAME: true
+        BACKUP_CLOUD_FOLDER: database/osmcha-db
+        BACKUP_CLOUD_FILE: osmseed-osmcha-db
+        AWS_S3_BUCKET: secure-bucket
+        # Clean up backups options
+        CLEANUP_BACKUPS: true
+        RETENTION_DAYS: "30"
+      resources:
+        enabled: false
+        requests:
+          memory: "300Mi"
+          cpu: "0.5"
+        limits:
+          memory: "400Mi"
+          cpu: "0.6"
+      nodeSelector:
+        enabled: false
 # ====================================================================================================
 # Variables for osm-seed for osmosis, this configuration os to get the planet dump files from apidb
 # ====================================================================================================
@@ -275,7 +290,6 @@ planetDump:
       cpu: "4"
   nodeSelector:
     enabled: false
-
 # ====================================================================================================
 # Variables for replication-job, Configuration to create the replication files by, minute, hour, or day
 # ====================================================================================================
@@ -294,7 +308,6 @@ replicationJob:
       cpu: "10"
   nodeSelector:
     enabled: false
-
 # ====================================================================================================
 # Variables for osm-seed to pupulate the apidb
 # ====================================================================================================
@@ -313,7 +326,6 @@ populateApidb:
     limits:
       memory: "2Gi"
       cpu: "2.5"
-
 # ====================================================================================================
 # Variables to start a pod to process osm files
 # ====================================================================================================
@@ -333,7 +345,6 @@ osmProcessor:
     limits:
       memory: "16Gi"
       cpu: "4"
-
 # ====================================================================================================
 # Variables for tiler-db
 # ====================================================================================================
@@ -348,11 +359,11 @@ tilerDb:
     POSTGRES_USER: postgres
     POSTGRES_PASSWORD: "1234"
     POSTGRES_PORT: 5432
-    POSTGRES_DB_MAX_CONNECTIONS: 100
-    POSTGRES_DB_SHARED_BUFFERS: 128MB
-    POSTGRES_DB_WORK_MEM: 4MB
-    POSTGRES_DB_MAINTENANCE_WORK_MEM: 64MB
-    POSTGRES_DB_EFFECTIVE_CACHE_SIZE: 4GB
+    # POSTGRES_DB_MAX_CONNECTIONS: 100
+    # POSTGRES_DB_SHARED_BUFFERS: 128MB
+    # POSTGRES_DB_WORK_MEM: 4MB
+    # POSTGRES_DB_MAINTENANCE_WORK_MEM: 64MB
+    # POSTGRES_DB_EFFECTIVE_CACHE_SIZE: 4GB
   persistenceDisk:
     enabled: false
     accessMode: ReadWriteOnce
@@ -362,8 +373,8 @@ tilerDb:
     localVolumeHostPath: /mnt/tiler-db-data
     localVolumeSize: 10Gi
     # AWS
-    AWS_ElasticBlockStore_volumeID: vol-1234bcd
-    AWS_ElasticBlockStore_size: 50Gi
+    AWS_ElasticBlockStore_volumeID: vol-0cf316caac04fc623
+    AWS_ElasticBlockStore_size: 20Gi
     # GCP
     GCP_gcePersistentDisk_pdName: osmseed-disk-tilerdb-v1
     GCP_gcePersistentDisk_size: 50Gi
@@ -379,7 +390,26 @@ tilerDb:
     enabled: false
     label_key: nodegroup_type
     label_value: tiler
-
+  # To use postgresqlConfig, you need to have already $PGDATA set up in a persistent disk
+  postgresqlConfig:
+    enabled: false
+    values: |
+      listen_addresses = '*'
+      max_connections = 100
+      shared_buffers = 128MB
+      effective_cache_size = 256MB
+      maintenance_work_mem = 64MB
+      checkpoint_completion_target = 0.7
+      wal_buffers = 16MB
+      default_statistics_target = 100
+      random_page_cost = 1.1
+      effective_io_concurrency = 200
+      work_mem = 4MB
+      min_wal_size = 80MB
+      max_wal_size = 1GB
+      max_worker_processes = 4
+      max_parallel_workers_per_gather = 2
+      max_parallel_workers = 4
 # ====================================================================================================
 # Variables for tiler-imposm
 # ====================================================================================================
@@ -393,6 +423,8 @@ tilerImposm:
     TILER_IMPORT_PBF_URL: http://download.geofabrik.de/europe/monaco-latest.osm.pbf
     TILER_IMPORT_LIMIT: https://gist.githubusercontent.com/Rub21/96bdcac5eb11f0b36ba8d0352ac537f4/raw/2606f2e207d4a0d895897a83efa1efacefd36eb4/monaco.geojson
     UPLOAD_EXPIRED_FILES: true
+    IMPORT_NATURAL_EARTH: true
+    IMPORT_OSM_LAND: true
   persistenceDisk:
     enabled: false
     accessMode: ReadWriteOnce
@@ -428,6 +460,7 @@ tilerServer:
     tag: ""
   replicaCount: 1
   serviceAnnotations: {}
+  ingressDomain: tiler2.dev.openhistoricalmap.org
   env:
     TILER_SERVER_PORT: 9090
     TILER_CACHE_TYPE: s3 #In case TILER_CACHE_TYPE=s3, the kubernetes teemplate will come up with a deployment pod
@@ -465,6 +498,8 @@ tilerServer:
     enabled: false
     label_key: nodegroup_type
     label_value: tiler
+  autoscaling:
+    enabled: false
 # ====================================================================================================
 # Variables for tiler-server cache cleaner, only avaliable in case the TILER_CACHE_TYPE = s3
 # ====================================================================================================
@@ -519,6 +554,34 @@ tilerVisor:
     label_key: nodegroup_type
     label_value: tiler
 # ====================================================================================================
+# Variables for Tasking Manager DB
+# ====================================================================================================
+tmDb:
+  enabled: false
+  image:
+    name: "postgres"
+    tag: "11"
+  nodeSelector:
+    enabled: false
+    label_key: nodegroup_type
+    label_value: web
+  env:
+    POSTGRES_DB: tm
+    POSTGRES_PASSWORD: tm
+    POSTGRES_USER: postgres
+  persistenceDisk:
+    enabled: false
+    mountPath: /var/lib/postgresql/data
+    subPath: postgresql-db
+  resources:
+    enabled: false
+    requests:
+      memory: "1Gi"
+      cpu: "2"
+    limits:
+      memory: "2Gi"
+      cpu: "2"
+# ====================================================================================================
 # Variables for Tasking Manager API
 # ====================================================================================================
 
@@ -530,6 +593,7 @@ tmApi:
   nodeSelector:
     enabled: false
   replicaCount: 1
+  ingressDomain: tm-api.dev.osmseed.org
   serviceAnnotations: {}
   env:
     POSTGRES_HOST: "tm"
@@ -566,7 +630,6 @@ tmApi:
     limits:
       memory: "2Gi"
       cpu: "2"
-
 # ====================================================================================================
 # Variables for nominatim api
 # ====================================================================================================
@@ -577,6 +640,7 @@ nominatimApi:
     tag: ""
   serviceAnnotations: {}
   replicaCount: 1
+  ingressDomain: nominatim-api.dev.osmseed.org
   env:
     PBF_URL: http://download.geofabrik.de/europe/monaco-latest.osm.pbf
     REPLICATION_URL: http://download.geofabrik.de/europe/monaco-updates
@@ -617,7 +681,6 @@ nominatimApi:
     GCP_gcePersistentDisk_size: 50Gi
   nodeSelector:
     enabled: false
-
 # ====================================================================================================
 # Variables for overpass-api
 # ====================================================================================================
@@ -627,6 +690,7 @@ overpassApi:
     name: ""
     tag: ""
   serviceAnnotations: {}
+  ingressDomain: overpass-api.dev.osmseed.org
   env:
     OVERPASS_META: "yes"
     OVERPASS_MODE: init
@@ -635,6 +699,7 @@ overpassApi:
     OVERPASS_RULES_LOAD: 10
     OVERPASS_PLANET_PREPROCESS: 'mv /db/planet.osm.bz2 /db/planet.osm.pbf && osmium cat -o /db/planet.osm.bz2 /db/planet.osm.pbf && rm /db/planet.osm.pbf'
     OVERPASS_REPLICATION_SEQUENCE_NUMBER: 5201000
+    OVERPASS_ALLOW_DUPLICATE_QUERIES: "yes"
   persistenceDisk:
     enabled: false
     accessMode: ReadWriteOnce
@@ -667,6 +732,7 @@ taginfo:
     name: ""
     tag: ""
   serviceAnnotations: {}
+  ingressDomain: taginfo-dev.staging.openhistoricalmap.org
   env:
     URL_PLANET_FILE_STATE: https://planet.osm.org/pbf/state.txt
     URL_HISTORY_PLANET_FILE_STATE: https://planet.osm.org/pbf/full-history/state.txt
@@ -680,6 +746,9 @@ taginfo:
     TAGINFO_PROJECT_REPO: https://github.com/taginfo/taginfo-projects.git
     DOWNLOAD_DB: "languages wiki"
     CREATE_DB: "db projects chronology"
+    ENVIRONMENT: development
+    AWS_S3_BUCKET: taginfo
+    INTERVAL_DOWNLOAD_DATA: 3600
   resources:
     enabled: false
     requests:
@@ -689,7 +758,24 @@ taginfo:
       memory: "2Gi"
       cpu: "2"
   nodeSelector:
-    enabled: false
+    enabled: true
+    label_key: nodegroup_type
+    label_value: web
+  cronjob:
+      enabled: true
+      schedule: "0 2 */3 * *"
+      nodeSelector:
+        enabled: true
+        label_key: nodegroup_type
+        label_value: job_xlarge
+      resources:
+        enabled: false
+        requests:
+          memory: "13Gi"
+          cpu: "3600m"
+        limits:
+          memory: "14Gi"
+          cpu: "3800m"
 # ====================================================================================================
 # Variables for osm-simple-metrics
 # ====================================================================================================
@@ -709,7 +795,6 @@ osmSimpleMetrics:
       cpu: "2"
   nodeSelector:
     enabled: false
-
 # ====================================================================================================
 # Variables for osm-simple-metrics
 # ====================================================================================================
@@ -732,7 +817,6 @@ monitoringReplication:
       cpu: "2"
   nodeSelector:
     enabled: false
-
 # ====================================================================================================
 # Variables for changeset-replication-job, Configuration to create the replication files by, minute, hour, or day
 # ====================================================================================================
@@ -765,8 +849,9 @@ osmchaWeb:
 osmchaApi:
   enabled: false
   image:
-    name: "ghcr.io/willemarcel/osmcha-django"
-    tag: "10d7f6748d9e55d439339ed2c35509db15f782a6"
+    name: "ghcr.io/osmcha/osmcha-django"
+    tag: "61a80e897b45fb9b1a177bf433fb79bfa7fda59d"
+  ingressDomain: osmcha.dev.osmseed.org
   env:
     DJANGO_SETTINGS_MODULE: "config.settings.production"
     OSMCHA_FRONTEND_VERSION: "v0.86.0-production"
@@ -778,7 +863,6 @@ osmchaApi:
     OSM_SERVER_URL: https://www.osmseed.org
     OAUTH_REDIRECT_URI: https://osmcha-staging.osmseed.org/oauth-landing.html
     OSM_PLANET_BASE_URL: https://s3.amazonaws.com/planet.osmseed.org/replication/changesets/
-
     ## frontend
     OSMCHA_URL: https://osmcha-staging.osmseed.org
     OSMCHA_API_URL: www.osmseed.org
@@ -799,7 +883,6 @@ osmchaApi:
     enabled: false
     label_key: nodegroup_type
     label_value: db
-
 # ====================================================================================================
 # Variables for osmcha DB
 # ====================================================================================================
@@ -835,7 +918,6 @@ osmchaDb:
     GCP_gcePersistentDisk_size: 50Gi
   nodeSelector:
     enabled: false
-
 # ====================================================================================================
 # Planet server files
 # ====================================================================================================
