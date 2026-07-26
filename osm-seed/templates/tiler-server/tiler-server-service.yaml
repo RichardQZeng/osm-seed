@@ -8,54 +8,19 @@ metadata:
     component: tiler-server-service
     environment: {{ .Values.environment }}
     release: {{ .Release.Name }}
+  {{- with .Values.tilerServer.serviceAnnotations }}
   annotations:
-    {{- if and (eq .Values.serviceType "LoadBalancer") .Values.AWS_SSL_ARN }}
-    service.beta.kubernetes.io/aws-load-balancer-ssl-cert: {{ .Values.AWS_SSL_ARN }}
-    service.beta.kubernetes.io/aws-load-balancer-backend-protocol: http
-    service.beta.kubernetes.io/aws-load-balancer-ssl-ports: https
-    service.beta.kubernetes.io/aws-load-balancer-connection-idle-timeout: "600"
-    {{- end }}
-    {{- if eq .Values.serviceType "ClusterIP" }}
-    kubernetes.io/ingress.class: nginx
-    cert-manager.io/cluster-issuer: letsencrypt-prod-issuer
-    {{- else }}
-    fake.annotation: fake
-    {{- end }}
-    {{- with .Values.tilerServer.serviceAnnotations }}
     {{- toYaml . | nindent 4 }}
-    {{- end }}
+  {{- end }}
 spec:
-  # If tilerServer.externalService.enabled = true, we use ExternalName; otherwise use user-defined serviceType
-  type: {{- if .Values.tilerServer.externalService.enabled }} ExternalName {{- else }} {{ .Values.serviceType }} {{- end }}
-
-  {{- if .Values.tilerServer.externalService.enabled }}
-  # external name service
-  externalName: "{{ .Values.tilerServer.externalService.ip }}"
+  type: {{ .Values.serviceType }}
   ports:
-    - port: 80
+    - name: http
+      port: 80
       protocol: TCP
-      name: http
-      targetPort: {{ .Values.tilerServer.externalService.port }}
-    - port: 443
-      protocol: TCP
-      name: https
-      targetPort: {{ .Values.tilerServer.externalService.port }}
-  {{- else }}
-  # normal (internal) service
-  ports:
-    - port: 80
       targetPort: http
-      protocol: TCP
-      name: http
-    {{- if and (eq .Values.serviceType "LoadBalancer") .Values.AWS_SSL_ARN }}
-    - port: 443
-      targetPort: http
-      protocol: TCP
-      name: https
-    {{- end }}
   selector:
     app: {{ template "osm-seed.name" . }}
     release: {{ .Release.Name }}
-    run: {{ .Release.Name }}-tiler-server
-  {{- end }}
+    run: {{ .Release.Name }}-tiler-server # This is working for deployment and not for statefulset , make sure you use "s3" to storage the vtiles
 {{- end }}

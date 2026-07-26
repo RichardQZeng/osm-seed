@@ -1,95 +1,75 @@
 #!/usr/bin/env bash
-set -x
+# set -euo pipefail
 WORKDIR=/usr/src/app
 DATADIR=/usr/src/app/data
-DATADOWNLOAD=/osm/planet/var
-mkdir -p $DATADIR/
-mkdir -p $DATADOWNLOAD/
-mkdir -p $DATADIR/update/log/
+DATA_OHM_DOWNLOAD=/osm/planet/var
+mkdir -p "$DATADIR/update/log" "$DATA_OHM_DOWNLOAD"
 
 updates_source_code() {
-    echo "Update...Procesor source code"
-    sed -i 's/"env -/"/g' $WORKDIR/taginfo/sources/util.sh
-    sed -i '/configure do/a \ \ \ \ set :port, 80' $WORKDIR/taginfo/web/taginfo.rb
-    sed -i "/configure do/a \ \ \ \ set :bind, '0.0.0.0'" $WORKDIR/taginfo/web/taginfo.rb
-    # Function to replace the projects repo to get the projects information
-    TAGINFO_PROJECT_REPO=${TAGINFO_PROJECT_REPO//\//\\/}
-    sed -i -e 's/https:\/\/github.com\/taginfo\/taginfo-projects.git/'$TAGINFO_PROJECT_REPO'/g' $WORKDIR/taginfo/sources/projects/update.sh
+    [ ! -z "$TAGINFO_PROJECT_REPO" ] && \
+        sed -i "s|https://github.com/taginfo/taginfo-projects.git|$TAGINFO_PROJECT_REPO|g" $WORKDIR/taginfo/sources/projects/update.sh
 }
 
 download_planet_files() {
-    # Check if URL_PLANET_FILE_STATE exist and set URL_PLANET_FILE
-    if [[ ${URL_PLANET_FILE_STATE} && ${URL_PLANET_FILE_STATE-x} ]]; then
-        wget -q -O state.planet.txt --no-check-certificate - $URL_PLANET_FILE_STATE
-        URL_PLANET_FILE=$(cat state.planet.txt)
-    fi
-    # Check if URL_HISTORY_PLANET_FILE_STATE exist and set URL_HISTORY_PLANET_FILE
-    if [[ ${URL_HISTORY_PLANET_FILE_STATE} && ${URL_HISTORY_PLANET_FILE_STATE-x} ]]; then
-        wget -q -O state.history.txt --no-check-certificate - $URL_HISTORY_PLANET_FILE_STATE
-        URL_HISTORY_PLANET_FILE=$(cat state.history.txt)
-    fi
-    # Download pbf files
-    wget -O $DATADOWNLOAD/current-planet.osm.pbf $URL_PLANET_FILE
-    wget -O $DATADOWNLOAD/current-history-planet.osh.pbf $URL_HISTORY_PLANET_FILE
-}
+    wget -q -O state.planet.txt --no-check-certificate "$URL_PLANET_FILE_STATE" && URL_PLANET_FILE=$(cat state.planet.txt)
+    wget -q -O state.history.txt --no-check-certificate "$URL_HISTORY_PLANET_FILE_STATE" && URL_HISTORY_PLANET_FILE=$(cat state.history.txt)
 
-process_data() {
-    download_planet_files
-    cd $WORKDIR/taginfo/sources/
-    ./update_all.sh $DATADIR
-    db/update.sh $DATADIR
-    master/update.sh $DATADIR
-    projects/update.sh $DATADIR
-    cp $DATADIR/selection.db $DATADIR/../
-    # languages/update.sh $DATADIR
-    # wiki/update.sh $DATADIR
-    # wikidata/update.sh $DATADIR
-    chronology/update.sh $DATADIR
-    ./update_all.sh $DATADIR
-    mv $DATADIR/*.db $DATADIR/
-    mv $DATADIR/*/*.db $DATADIR/
-    # if BUCKET_NAME is set upload data
-    if ! aws s3 ls "s3://$BUCKET_NAME/$ENVIRONMENT" 2>&1 | grep -q 'An error occurred'; then
-        aws s3 sync $DATADIR/ s3://$AWS_S3_BUCKET/$ENVIRONMENT/  --exclude "*" --include "*.db"
+    local remote_md5_planet remote_md5_history
+    remote_md5_planet=$(echo -n "$URL_PLANET_FILE" | md5sum | awk '{print $1}')
+    remote_md5_history=$(echo -n "$URL_HISTORY_PLANET_FILE" | md5sum | awk '{print $1}')
+
+    # Download planet file if it doesn't exist or the URL (md5) changed
+    local planet_file="$DATA_OHM_DOWNLOAD/current-planet.osm.pbf"
+    local planet_md5_file="$DATA_OHM_DOWNLOAD/current-planet.osm.pbf.md5"
+    if [ ! -f "$planet_file" ] || [ ! -f "$planet_md5_file" ] || [ "$(cat "$planet_md5_file")" != "$remote_md5_planet" ]; then
+        echo "Downloading planet file from $URL_PLANET_FILE ..."
+        wget -O "$planet_file" "$URL_PLANET_FILE" && echo "$remote_md5_planet" > "$planet_md5_file"
+    else
+        echo "Planet file is up to date, skipping download."
+    fi
+
+    # Download history planet file if it doesn't exist or the URL (md5) changed
+    local history_file="$DATA_OHM_DOWNLOAD/current-history-planet.osh.pbf"
+    local history_md5_file="$DATA_OHM_DOWNLOAD/current-history-planet.osh.pbf.md5"
+    if [ ! -f "$history_file" ] || [ ! -f "$history_md5_file" ] || [ "$(cat "$history_md5_file")" != "$remote_md5_history" ]; then
+        echo "Downloading history planet file from $URL_HISTORY_PLANET_FILE ..."
+        wget -O "$history_file" "$URL_HISTORY_PLANET_FILE" && echo "$remote_md5_history" > "$history_md5_file"
+    else
+        echo "History planet file is up to date, skipping download."
     fi
 }
 
-# Compress files to download
-compress_files() {
-    mkdir -p download
-    for file in data/*; do
-        bzip2 -k -9 -c "$file" > "download/$(basename "$file").bz2"
-    done
-}
 
-download_db_files() {
-    if ! aws s3 ls "s3://$AWS_S3_BUCKET/$ENVIRONMENT" 2>&1 | grep -q 'An error occurred'; then
-        aws s3 sync "s3://$AWS_S3_BUCKET/$ENVIRONMENT/" "$DATADIR/"
-        mv $DATADIR/*.db $DATADIR/
-        mv $DATADIR/*/*.db $DATADIR/
-        compress_files
-    fi
-}
+if [ ! -z "${OVERWRITE_CONFIG_URL}" ]; then
+    echo "Downloading config from ${OVERWRITE_CONFIG_URL}"
+    wget -q "$OVERWRITE_CONFIG_URL" -O /usr/src/app/taginfo-config.json || echo "Warning: Failed to download config from ${OVERWRITE_CONFIG_URL}"
+fi
 
-sync_latest_db_version() {
-    while true; do
-        sleep "$INTERVAL_DOWNLOAD_DATA"
-        download_db_files
-    done
-}
-
-start_web() {
-    echo "Start...Taginfo web service"
-    download_db_files
-    cd $WORKDIR/taginfo/web && ./taginfo.rb & sync_latest_db_version
-}
-
-ACTION=$1
-# Overwrite the config file
-[[ ! -z ${OVERWRITE_CONFIG_URL} ]] && wget $OVERWRITE_CONFIG_URL -O /usr/src/app/taginfo-config.json
 updates_source_code
-if [ "$ACTION" = "web" ]; then
-    start_web
-    elif [ "$ACTION" = "data" ]; then
-    process_data
+
+export BUNDLE_GEMFILE=$WORKDIR/taginfo/Gemfile
+set -x
+download_planet_files
+cd $WORKDIR/taginfo
+bundle check || bundle install
+cd sources/
+./update_all.sh $DATADIR
+db/update.sh $DATADIR
+master/update.sh $DATADIR
+projects/update.sh $DATADIR
+cp $DATADIR/selection.db $DATADIR/../selection.db
+chronology/update.sh $DATADIR
+wikidata/update.sh $DATADIR
+# wiki/update.sh $DATADIR
+sw/update.sh $DATADIR
+languages/update.sh $DATADIR
+./update_all.sh $DATADIR
+
+find "$DATADIR" -name "*.db" -type f -exec mv {} "$DATADIR/" \; 2>/dev/null || true
+if [ -n "$AWS_S3_BUCKET" ]; then
+    if aws s3 ls "s3://$AWS_S3_BUCKET/taginfo" >/dev/null 2>&1; then
+        aws s3 sync "$DATADIR/" "s3://$AWS_S3_BUCKET/taginfo/" --exclude "*" --include "*.db" || echo "Warning: S3 sync failed (revisa credenciales si usas AWS)"
+    else
+        echo "Warning: No se pudo acceder a s3://$AWS_S3_BUCKET/taginfo (credenciales o bucket inexistente)"
+    fi
 fi

@@ -1,71 +1,32 @@
-# ====================================================================================================
-# ====================================================================================================
-# ==================================Global Configurations=============================================
-# ====================================================================================================
-# ====================================================================================================
-# The version of the image group in osm-seed, get it here: https://hub.docker.com/r/developmentseed/osmseed-web/tags/
-osmSeedVersion: develop-9302179
+# Image group version: https://github.com/orgs/osm-seed/packages
+osmSeedVersion: v1
 environment: development
-# cloudProvider is provider where you are going to deploy osm-seed, it could be: aws, gcp, azure, minikube
+
+# Where to deploy: aws, gcp, azure, k3s
 cloudProvider: aws
-# ====================================================================================================
-# AWS: In case you are using the cloudProvider=aws set the below variables, We are assuming the nodes has a policies access to S3
-# ====================================================================================================
+# Cloud storage bucket for the provider set above
 AWS_S3_BUCKET: s3://osm-seed
-# ====================================================================================================
-# GCP: In case you are using the cloudProvider=gcp set the below variables, We are assuming the nodes has a policies to upload files to cloud storage
-# ====================================================================================================
-GCP_STORAGE_BUCKET: gs://osm-seed-test
-# ====================================================================================================
-# AZURE: In case you are using the cloudProvider=azure set the below variables
-# ====================================================================================================
-AZURE_STORAGE_ACCOUNT: osmseed
-AZURE_CONTAINER_NAME: osm-seed
-AZURE_STORAGE_CONNECTION_STRING: xyz..
-# ====================================================
-# AWS: Specify ARN for SSL certificate, currently assumes a single wildcard cert
-# ====================================================
-AWS_SSL_ARN: false
-# Specify serviceType.
-#
-# serviceType can be one of three values: 'NodePort', 'ClusterIP' or 'LoadBalancer'
-# Use `NodePort` for local testing on minikube.
-#
-# The recommended setting is `ClusterIP`, and then following the instructions to
-# point a DNS record to the cluster IP address. This will setup the ingress rules
-# for all services as subdomains and configure SSL using Lets Encrypt.
-#
-# If you specify `LoadBalancer` as the service type, if you also specify
-# an `AWS_SSL_ARN` that is a wildcart certificate, that will be configured
-# as the SSL certificate for your services. Else, you will need to configure
-# SSL separately.
-# serviceType: NodePort
+
+# Service type: NodePort, ClusterIP or LoadBalancer. ClusterIP is recommended;
 serviceType: ClusterIP
+
+# Create a cert-manager ClusterIssuer (Let's Encrypt). Opt-in.
 createClusterIssuer: false
-# Domain that is pointed to the clusterIP
-# You will need to create an A record like *.osmseed.example.com pointed to the ClusterIP
-# Then, the cluster configuration will setup services at their respective subdomains:
-# - web.osmseed.example.com
-# - overpass.osmseed.example.com
-# - nominatim.osmseed.example.com
-# - etc.
-domain: dev.osmseed.org
-# ====================================================================================================
-# Configuration for Lets Encrypt setup
-# ====================================================================================================
 
-# Admin Email address used when generating Lets Encrypt certificates.
-# You will be notified of expirations, etc. on this email address.
+# Default ingress class for all components. Override per component with
+# <component>.ingress.className. Leave empty if you expose services another way.
+ingressClassName: ""
+
+# Base domain. Components default to <name>.<domain>, e.g. web.osmseed.org.
+domain: osmseed.org
+
+# Email for Let's Encrypt expiry notices.
 adminEmail: admin@osmseed.org
-# ====================================================================================================
-# ====================================================================================================
-# ==================================Pods Configurations===============================================
-# ====================================================================================================
-# ====================================================================================================
 
 # ====================================================================================================
-# Variables for osm-seed database
+# Web Api Database
 # ====================================================================================================
+
 db:
   enabled: false
   image:
@@ -81,19 +42,12 @@ db:
     enabled: false
     mountPath: /var/lib/postgresql/data
     subPath: postgresql-db
-    # Minikube
+    # k3s (local-path dynamic / static hostPath)
     localVolumeHostPath: /mnt/db-data
     localVolumeSize: 10Gi
     # AWS
     AWS_ElasticBlockStore_volumeID: vol-06a278f66b15d4b3c
     AWS_ElasticBlockStore_size: 50Gi
-    # GCP
-    GCP_gcePersistentDisk_pdName: osmseed-disk-db-v1
-    GCP_gcePersistentDisk_size: 50Gi
-    # Azure
-    AZURE_diskName: osmseed-api-db-v1
-    AZURE_diskURI: /subscriptions/../../providers/Microsoft.Compute/disks/osmseed-api-db-v1
-    AZURE_diskSize: 20Gi
   resources:
     enabled: false
     requests:
@@ -127,7 +81,10 @@ db:
       max_worker_processes = 4
       max_parallel_workers_per_gather = 2
       max_parallel_workers = 4
-  
+  nodeAffinity:
+    enabled: false
+    key: "nodegroup_type"
+    values: ["database"]
 # ====================================================================================================
 # Variables for osm-seed website
 # ====================================================================================================
@@ -136,11 +93,29 @@ web:
   image:
     name: ""
     tag: ""
+  serviceAccount:
+    enabled: true
+    name: ohm-web-s3-bucket-access-staging
   priorityClass: "high-priority"
   replicaCount: 1
-  ingressDomain: www.dev.osmseed.org
   serviceAnnotations: {}
+  # Per-component Ingress. enabled toggles creation; className falls back to the
+  # global ingressClassName; annotations are passed verbatim (provider-specific
+  # lives here); hosts default to web/api/apex of domain; tls is opt-in.
+  ingress:
+    enabled: false
+    className: ""
+    hosts:
+      - www.osmseed.org
+      - dev.osmseed.org
+      - api.osmseed.org
+    annotations: {}
+    tls:
+      enabled: false
+      secretName: ""
   env:
+    SERVER_URL: "www.osmseed.org"
+    SERVER_PROTOCOL: "https"
     MAILER_ADDRESS: smtp.gmail.com
     MAILER_DOMAIN: gmail.com
     MAILER_USERNAME: example@gmail.com
@@ -161,6 +136,9 @@ web:
     RAILS_STORAGE_SERVICE: local
     RAILS_STORAGE_REGION: us-east-1
     RAILS_STORAGE_BUCKET: osmseed-website-bucket
+    PASSENGER_MAX_POOL_SIZE: 6
+    OPENSTREETMAP_AUTH_ID: ""
+    OPENSTREETMAP_AUTH_SECRET: ""
   resources:
     enabled: false
     requests:
@@ -174,22 +152,39 @@ web:
   nodeSelector:
     enabled: false
   autoscaling:
-    enabled: false
+    enabled: true
     minReplicas: 1
-    maxReplicas: 3
-    cpuUtilization: 80
+    maxReplicas: 6
+    cpuUtilization:
+      enable: false
+      value: 85
+    memoryUtilization:
+      enable: false
+      value: 85
+    behavior:
+      scaleUp:
+        stabilizationWindowSeconds: 60
+        policyValue: 100
+        periodSeconds: 60
+      scaleDown:
+        stabilizationWindowSeconds: 60
+        policyValue: 50
+        periodSeconds: 60
   sharedMemorySize: 256Mi
   livenessProbeExec: true
+
+  nodeAffinity:
+    enabled: true
+    key: "nodegroup_type"
+    values: ["web"]
+  podAntiAffinity: # To set that no two pods are scheduled on the same node
+    enabled: false
 # ====================================================================================================
 # Variables for memcached. Memcached is used to store session cookies
 # ====================================================================================================
 memcached:
   enabled: false
   priorityClass: "high-priority"
-  nodeSelector:
-    enabled: false
-    label_key: nodegroup_type
-    label_value: web
   resources:
     enabled: false
     requests:
@@ -200,22 +195,67 @@ memcached:
       enabled: false
       memory: "2Gi"
       cpu: "2"
+  nodeSelector:
+    enabled: false
+    label_key: nodegroup_type
+    label_value: web
+  nodeAffinity:
+    enabled: false
+    key: "nodegroup_type"
+    values: ["web"]
+# ====================================================================================================
+# Cgimap
+# ====================================================================================================
+cgimap:
+  image:
+    name: ""
+    tag: ""
+  enabled: false
+  serviceAnnotations: {}
+  priorityClass: "low-priority"
+  resources:
+    enabled: false
+    requests:
+      enabled: false
+      memory: "1Gi"
+      cpu: "2"
+    limits:
+      enabled: false
+      memory: "2Gi"
+      cpu: "2"
+  autoscaling:
+    enabled: false
+    minReplicas: 2
+    maxReplicas: 4
+    cpuUtilization: 60
+    memoryUtilization: 60
+  nodeSelector:
+    enabled: false
+    label_key: nodegroup_type
+    label_value: web
+  nodeAffinity:
+    enabled: false
+    key: "nodegroup_type"
+    values: ["web"]
 # ====================================================================================================
 # Variables for full-history container
 # ====================================================================================================
 fullHistory:
   enabled: false
-  priorityClass: "low-priority"
   image:
     name: ""
     tag: ""
-  nodeSelector:
-    enabled: false
-    label_key: nodegroup-type
-    label_value: ohm-non-tiler
+  priorityClass: "low-priority"
+  serviceAccount:
+    enabled: true
+    name: ohm-web-s3-bucket-access-staging
   schedule: "* * * * *"
   env:
     OVERWRITE_FHISTORY_FILE: false
+    PLANET_EXPORT_METHOD: planet-dump-ng
+    DUMP_CLOUD_URL: s3://osm-seed/db.dump
+    PLANET_EPOCH_DATE: '1970-01-01'
+    PLANET_DUMP_NG_METADATA_URL: https://osmseed.org/metadata/planet-meta.yaml
   resources:
     enabled: false
     requests:
@@ -226,15 +266,61 @@ fullHistory:
       enabled: false
       memory: "2Gi"
       cpu: "2"
+  nodeSelector:
+    enabled: false
+    label_key: nodegroup_type
+    label_value: web
+  nodeAffinity:
+    enabled: false
+    key: "nodegroup_type"
+    values: ["web"]
+# ====================================================================================================
+# Variables for changesets-dump container
+# ====================================================================================================
+changesetsDump:
+  enabled: false
+  image:
+    name: ""
+    tag: ""
+  priorityClass: "low-priority"
+  serviceAccount:
+    enabled: true
+    name: ohm-web-s3-bucket-access-staging
+  schedule: "* * * * *"
+  env:
+    OVERWRITE_CHANGESETS_FILE: false
+    DUMP_CLOUD_URL: s3://osm-seed/db.dump
+    PLANET_EPOCH_DATE: '1970-01-01'
+  resources:
+    enabled: false
+    requests:
+      enabled: false
+      memory: "1Gi"
+      cpu: "2"
+    limits:
+      enabled: false
+      memory: "2Gi"
+      cpu: "2"
+  nodeSelector:
+    enabled: false
+    label_key: nodegroup_type
+    label_value: web
+  nodeAffinity:
+    enabled: false
+    key: "nodegroup_type"
+    values: ["web"]
 # ====================================================================================================
 # Variables for osm-seed database backup and restore
 # ====================================================================================================
 dbBackupRestore:
   image:
-    name: "developmentseed/osmseed-backup-restore"
-    tag: "0.1.0-0.dev.git.942.h994af82"
+    name: ""
+    tag: ""
   cronjobs:
     - name: web-db
+      serviceAccount:
+        enabled: true
+        name: ohm-web-s3-bucket-access-staging
       enabled: false
       schedule: "* * * * *"
       env:
@@ -245,6 +331,9 @@ dbBackupRestore:
         BACKUP_CLOUD_FOLDER: database/web-db
         BACKUP_CLOUD_FILE: osmseed-api-web-db
         AWS_S3_BUCKET: secure-bucket
+        # Replication stream read at backup time to store the seqno next to the dump.
+        # Generic OSM default; deployments override it with their own stream.
+        MINUTE_REPLICATION_URL: https://planet.openstreetmap.org/replication/minute
         # Clean up backups options
         CLEANUP_BACKUPS: true
         RETENTION_DAYS: "30"
@@ -260,8 +349,17 @@ dbBackupRestore:
           cpu: "2"
       nodeSelector:
         enabled: false
+        label_key: nodegroup_type
+        label_value: web
+      nodeAffinity:
+        enabled: false
+        key: "nodegroup_type"
+        values: ["web"]
     - name: osmcha-db
       enabled: false
+      serviceAccount:
+        enabled: true
+        name: ohm-web-s3-bucket-access-staging
       schedule: "* * * * *"
       env:
         # DB action: backup/restore
@@ -286,6 +384,12 @@ dbBackupRestore:
           cpu: "2"
       nodeSelector:
         enabled: false
+        label_key: nodegroup_type
+        label_value: web
+      nodeAffinity:
+        enabled: false
+        key: "nodegroup_type"
+        values: ["web"]
 # ====================================================================================================
 # Variables for osm-seed for osmosis, this configuration os to get the planet dump files from apidb
 # ====================================================================================================
@@ -294,10 +398,17 @@ planetDump:
   image:
     name: ""
     tag: ""
+  serviceAccount:
+    enabled: true
+    name: ohm-web-s3-bucket-access-staging
   priorityClass: "medium-priority"
   schedule: "* * * * *"
   env:
     OVERWRITE_PLANET_FILE: false
+    DUMP_CLOUD_URL: s3://osm-seed/db.dump
+    PLANET_EXPORT_METHOD: planet-dump-ng
+    PLANET_EPOCH_DATE: '1970-01-01'
+    PLANET_DUMP_NG_METADATA_URL: https://osmseed.org/metadata/planet-meta.yaml
   resources:
     enabled: false
     requests:
@@ -310,6 +421,12 @@ planetDump:
       cpu: "2"
   nodeSelector:
     enabled: false
+    label_key: nodegroup_type
+    label_value: web
+  nodeAffinity:
+    enabled: false
+    key: "nodegroup_type"
+    values: ["web"]
 # ====================================================================================================
 # Variables for replication-job, Configuration to create the replication files by, minute, hour, or day
 # ====================================================================================================
@@ -318,6 +435,9 @@ replicationJob:
   image:
     name: ""
     tag: ""
+  serviceAccount:
+    enabled: true
+    name: ohm-web-s3-bucket-access-staging
   priorityClass: "medium-priority"
   env:
     ENABLE_SEND_SLACK_MESSAGE: "false"
@@ -334,15 +454,24 @@ replicationJob:
       cpu: "2"
   nodeSelector:
     enabled: false
+    label_key: nodegroup_type
+    label_value: web
+  nodeAffinity:
+    enabled: false
+    key: "nodegroup_type"
+    values: ["web"]
 # ====================================================================================================
 # Variables for osm-seed to pupulate the apidb
 # ====================================================================================================
 populateApidb:
   enabled: false
-  priorityClass: "medium-priority"
   image:
     name: ""
     tag: ""
+  priorityClass: "medium-priority"
+  serviceAccount:
+    enabled: true
+    name: ohm-web-s3-bucket-access-staging
   env:
     URL_FILE_TO_IMPORT: "http://download.geofabrik.de/europe/monaco-latest.osm.pbf"
   resources:
@@ -355,6 +484,14 @@ populateApidb:
       enabled: false
       memory: "2Gi"
       cpu: "2"
+  nodeSelector:
+    enabled: false
+    label_key: nodegroup_type
+    label_value: web
+  nodeAffinity:
+    enabled: false
+    key: "nodegroup_type"
+    values: ["web"]
 # ====================================================================================================
 # Variables to start a pod to process osm files
 # ====================================================================================================
@@ -382,8 +519,6 @@ osmProcessor:
 # ====================================================================================================
 tilerDb:
   enabled: false
-  useExternalHost: # In case you are using an external host for the database, make sure you add POSTGRES_HOST
-    enabled: false
   image:
     name: ""
     tag: ""
@@ -394,25 +529,18 @@ tilerDb:
     POSTGRES_USER: postgres
     POSTGRES_PASSWORD: "1234"
     POSTGRES_PORT: 5432
-    # POSTGRES_DB_MAX_CONNECTIONS: 100
-    # POSTGRES_DB_SHARED_BUFFERS: 128MB
-    # POSTGRES_DB_WORK_MEM: 4MB
-    # POSTGRES_DB_MAINTENANCE_WORK_MEM: 64MB
-    # POSTGRES_DB_EFFECTIVE_CACHE_SIZE: 4GB
   persistenceDisk:
     enabled: false
     accessMode: ReadWriteOnce
     mountPath: /var/lib/postgresql/data
     subPath: postgresql-d
-    # Minikube
+    # k3s: staticHostPath=true uses a fixed hostPath dir (reusable across releases); false = dynamic local-path
+    staticHostPath: false
     localVolumeHostPath: /mnt/tiler-db-data
     localVolumeSize: 10Gi
     # AWS
     AWS_ElasticBlockStore_volumeID: vol-0cf316caac04fc623
     AWS_ElasticBlockStore_size: 20Gi
-    # GCP
-    GCP_gcePersistentDisk_pdName: osmseed-disk-tilerdb-v1
-    GCP_gcePersistentDisk_size: 50Gi
   sharedMemorySize: 64Mi
   resources:
     enabled: false
@@ -424,10 +552,6 @@ tilerDb:
       enabled: false
       memory: "2Gi"
       cpu: "2"
-  nodeSelector:
-    enabled: false
-    label_key: nodegroup_type
-    label_value: tiler
   # To use postgresqlConfig, you need to have already $PGDATA set up in a persistent disk
   postgresqlConfig:
     enabled: false
@@ -448,6 +572,15 @@ tilerDb:
       max_worker_processes = 4
       max_parallel_workers_per_gather = 2
       max_parallel_workers = 4
+  nodeSelector:
+    enabled: false
+    label_key: nodegroup_type
+    label_value: web
+  nodeAffinity:
+    enabled: false
+    key: "nodegroup_type"
+    values: ["web"]
+
 # ====================================================================================================
 # Variables for tiler-imposm
 # ====================================================================================================
@@ -456,29 +589,46 @@ tilerImposm:
   image:
     name: ""
     tag: ""
+  serviceAccount:
+    enabled: true
+    name: ohm-web-s3-bucket-access-staging
   priorityClass: "medium-priority"
+  livenessProbe:
+    enabled: true
+    initialDelaySeconds: 14400
+    timeoutSeconds: 5
+    periodSeconds: 10
+    failureThreshold: 3
   env:
     TILER_IMPORT_FROM: osm
     TILER_IMPORT_PBF_URL: http://download.geofabrik.de/europe/monaco-latest.osm.pbf
-    TILER_IMPORT_LIMIT: https://gist.githubusercontent.com/Rub21/96bdcac5eb11f0b36ba8d0352ac537f4/raw/2606f2e207d4a0d895897a83efa1efacefd36eb4/monaco.geojson
-    TILER_CACHE_AWS_ENDPOINT: ""
+    REPLICATION_URL: http://download.geofabrik.de/europe/monaco-updates/
+    SEQUENCE_NUMBER: "0"
+    OVERWRITE_STATE: false
     UPLOAD_EXPIRED_FILES: true
     IMPORT_NATURAL_EARTH: true
     IMPORT_OSM_LAND: true
     IMPOSM3_IMPORT_LAYERS: all
+    # Refresh/recreate materialized views during replication updates
+    REFRESH_MVIEWS: false
+    RECREATE_MVIEWS_ON_UPDATE: false
+    # Upload of expired-tiles files needs CLOUDPROVIDER set (aws|gcp) + bucket/creds.
+    # If CLOUDPROVIDER is unset the upload is skipped.
+    CLOUDPROVIDER: aws
+    AWS_S3_BUCKET: ""
+    AWS_ACCESS_KEY_ID: ""
+    AWS_SECRET_ACCESS_KEY: ""
   persistenceDisk:
     enabled: false
     accessMode: ReadWriteOnce
     mountPath: /mnt/data
-    # Minikube
+    # k3s: staticHostPath=true uses a fixed hostPath dir (reusable across releases); false = dynamic local-path
+    staticHostPath: false
     localVolumeHostPath: /mnt/tiler-imposm-data
     localVolumeSize: 10Gi
     # AWS
     AWS_ElasticBlockStore_volumeID: vol-1234bcd
     AWS_ElasticBlockStore_size: 50Gi
-    # GCP
-    GCP_gcePersistentDisk_pdName: osmseed-disk-imposm-v1
-    GCP_gcePersistentDisk_size: 50Gi
   resources:
     enabled: false
     requests:
@@ -492,23 +642,34 @@ tilerImposm:
   nodeSelector:
     enabled: false
     label_key: nodegroup_type
-    label_value: tiler
+    label_value: web
+  nodeAffinity:
+    enabled: false
+    key: "nodegroup_type"
+    values: ["web"]
 # ====================================================================================================
 # Variables for tiler-server
 # ====================================================================================================
 tilerServer:
   enabled: false
-  externalService:
-    enabled: true
-    ip: "37.1.1.5"
-    port: 9090
   image:
     name: ""
     tag: ""
   priorityClass: "medium-priority"
+  serviceAccount:
+    enabled: true
+    name: ohm-s3-bucket-access-staging
   replicaCount: 1
   serviceAnnotations: {}
-  ingressDomain: tiler2.dev.openhistoricalmap.org
+  ingress:
+    enabled: false
+    className: ""
+    annotations: {}
+    hosts:
+      - tiler2.dev.openhistoricalmap.org
+    tls:
+      enabled: false
+      secretName: ""
   env:
     TILER_SERVER_PORT: 9090
     TILER_CACHE_TYPE: s3 #In case TILER_CACHE_TYPE=s3, the kubernetes teemplate will come up with a deployment pod
@@ -527,15 +688,12 @@ tilerServer:
     enabled: false
     accessMode: ReadWriteOnce
     mountPath: /mnt/data
-    # Minikube
+    # k3s (local-path dynamic / static hostPath)
     localVolumeHostPath: /mnt/tiler-server-data
     localVolumeSize: 10Gi
     # AWS
     AWS_ElasticBlockStore_volumeID: vol-1234bcd
     AWS_ElasticBlockStore_size: 50Gi
-    # GCP
-    GCP_gcePersistentDisk_pdName: osmseed-disk-db-v1
-    GCP_gcePersistentDisk_size: 50Gi
   resources:
     enabled: false
     requests:
@@ -549,43 +707,284 @@ tilerServer:
   nodeSelector:
     enabled: false
     label_key: nodegroup_type
-    label_value: tiler
-  autoscaling:
+    label_value: web
+  nodeAffinity:
     enabled: false
+    key: "nodegroup_type"
+    values: ["web"]
+
+# ====================================================================================================
+# Variables for tiler-server-martin (Martin + Nginx vector tile server)
+# ====================================================================================================
+tilerServerMartin:
+  enabled: false
+  image:
+    name: ""
+    tag: ""
+  priorityClass: "medium-priority"
+  replicaCount: 1
+  # POSTGRES_* are injected from the tiler-db configmap (envFrom).
+  env:
+    OHM_DOMAIN: openhistoricalmap.org
+    MARTIN_WORKER_PROCESSES: 8
+    MARTIN_POOL_SIZE: 50
+    # Only needed to publish vtiles_languages.geojson to S3.
+    # If AWS_S3_BUCKET is empty the upload is skipped.
+    AWS_S3_BUCKET: ""
+    AWS_ACCESS_KEY_ID: ""
+    AWS_SECRET_ACCESS_KEY: ""
+  resources:
+    enabled: false
+    requests:
+      enabled: false
+      memory: "1Gi"
+      cpu: "2"
+    limits:
+      enabled: false
+      memory: "2Gi"
+      cpu: "2"
+  nodeSelector:
+    enabled: false
+    label_key: nodegroup_type
+    label_value: web
+  nodeAffinity:
+    enabled: false
+    key: "nodegroup_type"
+    values: ["web"]
+
+# ====================================================================================================
+# Variables for tiler-varnish (HTTP cache in front of tiler-server-martin)
+# ====================================================================================================
+tilerVarnish:
+  enabled: false
+  image:
+    name: ""
+    tag: ""
+  priorityClass: "medium-priority"
+  replicaCount: 1
+  serviceAnnotations: {}
+  ingress:
+    enabled: false
+    className: ""
+    hosts: []
+    annotations: {}
+    tls:
+      enabled: false
+      secretName: ""
+  # Varnish malloc storage sizes
+  dynamicSize: "16G"
+  staticSize: "4G"
+  resources:
+    enabled: false
+    requests:
+      enabled: false
+      memory: "1Gi"
+      cpu: "1"
+    limits:
+      enabled: false
+      memory: "24Gi"
+      cpu: "4"
+  nodeSelector:
+    enabled: false
+    label_key: nodegroup_type
+    label_value: web
+  nodeAffinity:
+    enabled: false
+    key: "nodegroup_type"
+    values: ["web"]
+
+# ====================================================================================================
+# Variables for osmx-adiff-builder (builds augmented diffs from OSMX into S3)
+# ====================================================================================================
+osmxAdiffBuilder:
+  enabled: false
+  # NOTE: image repo keeps the ohmx name (not renamed in ghcr).
+  # serviceAccountName: ohm-s3-bucket-access-staging
+  # awsSecretName: ohmx-adiff-aws-creds
+  # WORKDIR inside the container is /data
+  env:
+    PLANET_PBF_URL: 
+      https://s3.amazonaws.com/planet.openhistoricalmap.org/planet/planet-latest.osm.pbf
+    REPLICATION_URL: https://s3.amazonaws.com/planet.openhistoricalmap.org/replication/minute
+    API_URL: https://www.openhistoricalmap.org
+    OSMX_INITIAL_SEQNUM: "0"
+    AWS_S3_BUCKET: s3://planet.openhistoricalmap.org
+  persistenceDisk:
+    enabled: true
+    mountPath: /data
+    size: 50Gi
+    storageClassName: ""
+    # k3s: staticHostPath=true uses a fixed hostPath dir (reusable across releases); false = dynamic local-path
+    staticHostPath: true
+    localVolumeHostPath: /mnt/osmx-adiff-data
+    localVolumeSize: 50Gi
+  resources:
+    enabled: false
+    requests:
+      memory: "2Gi"
+      cpu: "1"
+    limits:
+      memory: "4Gi"
+      cpu: "2"
+  nodeSelector:
+    enabled: false
+    label_key: nodegroup_type
+    label_value: web
+  nodeAffinity:
+    enabled: false
+    key: "nodegroup_type"
+    values: ["web"]
+
+# ====================================================================================================
+# Variables for the planet-stats daily pipeline (stats dashboard + boundary viewer)
+# Computes daily statistics from the planet file. State round-trips through S3.
+# ====================================================================================================
+planetStats:
+  enabled: false
+  image:
+    name: ""
+    tag: ""
+  serviceAccount:
+    enabled: false
+    name: ""
+  priorityClass: "medium-priority"
+  schedule: "0 4 * * *"
+  env:
+    PUBLISH_TARGET: "s3"
+    DASHBOARD_DIR: "/mnt/planet-stats"
+    PLANET_STATS_STATE_S3_URI: ""
+    AWS_S3_ENDPOINT: ""
+  resources:
+    enabled: false
+  nodeSelector:
+    enabled: false
+  nodeAffinity:
+    enabled: false
+
+
+# ====================================================================================================
+# Tiler cache: runs sqs_processor.py (purge/seed from AWS SQS) + main.py (/clean-cache API), like the compose tiler_sqs_cleaner
+# ====================================================================================================
+tilerCache:
+  enabled: false
+  # Default image for standalone/direct installs; chartpress overrides name/tag
+  # in the umbrella chart (valuesPath osm-seed.tilerCache.image).
+  image:
+    name: ""
+    tag: ""
+  replicaCount: 1
+  env:
+    PORT: 8000
+    ENVIRONMENT: development
+    # Varnish endpoint to send BAN requests. Empty => http://<release>-tiler-varnish:6081
+    VARNISH_URL: ""
+    ZOOM_LEVELS_TO_DELETE: 13,14,15,16,17,18,19,20
+    # SQS processor (purge/seed): remote AWS queue + credentials
+    SQS_QUEUE_URL: ""
+    AWS_REGION_NAME: us-east-1
+    # AWS creds for boto3. On EKS use a serviceAccount/IRSA instead and leave these empty.
+    AWS_ACCESS_KEY_ID: ""
+    AWS_SECRET_ACCESS_KEY: ""
+  resources:
+    enabled: false
+    requests:
+      memory: "256Mi"
+      cpu: "0.25"
+    limits:
+      memory: "512Mi"
+      cpu: "0.5"
+  nodeSelector:
+    enabled: false
+    label_key: nodegroup_type
+    label_value: web
+
+# ====================================================================================================
+# Tiler monitor (pipeline): FastAPI that checks changesets reach the tiler DB / tiles / S3.
+# Runs only pipeline-monitor (main.py); the language monitor is a separate workload.
+# ====================================================================================================
+tilerMonitorPipeline:
+  enabled: false
+  # Default image for standalone/direct installs; chartpress overrides name/tag
+  # in the umbrella chart (valuesPath osm-seed.tilerMonitorPipeline.image).
+  image:
+    name: ""
+    tag: ""
+  replicaCount: 1
+  env:
+    MONITOR_PORT: 8001
+    OHM_API_BASE: https://www.openhistoricalmap.org/api/0.6
+    CHANGESET_LIMIT: 30
+    TILE_CHECK_ZOOM: 16
+    TILER_MONITORING_CHECK_INTERVAL: "1h"
+    TILER_MONITORING_MISSING_THRESHOLD_PCT: 10
+    TILER_MONITORING_MAX_RETRIES: 3
+    TILER_MONITORING_FULL_CHECK_SAMPLE_PCT: 25
+    TILER_MONITORING_BASE_URL: ""
+    TILER_MONITORING_SLACK_WEBHOOK_URL: ""
+    OHM_COMMENT_USER: ""
+    OHM_COMMENT_PASSWORD: ""
+    VERBOSE_LOGGING: "false"
+  # SQLite retry store lives here (TILER_MONITORING_RETRY_DB defaults to /data/pipeline_retries.db)
+  persistenceDisk:
+    enabled: false
+    mountPath: /data
+    # k3s: dynamic local-path, or static hostPath when staticHostPath=true
+    staticHostPath: false
+    localVolumeHostPath: /mnt/tiler-monitor-pipeline-data
+    localVolumeSize: 1Gi
+    # AWS
+    AWS_ElasticBlockStore_volumeID: ""
+    AWS_ElasticBlockStore_size: 1Gi
+  resources:
+    enabled: false
+    requests:
+      memory: "256Mi"
+      cpu: "0.25"
+    limits:
+      memory: "512Mi"
+      cpu: "0.5"
+  nodeSelector:
+    enabled: false
+    label_key: nodegroup_type
+    label_value: web
+
+# ====================================================================================================
+# Tiler monitor (language): CronJob that recreates mviews + restarts Martin when new languages appear.
+# Needs RBAC (exec into imposm, rollout restart Martin) — see templates/tiler-monitor-language/rbac.yaml.
+# ====================================================================================================
+tilerMonitorLanguage:
+  enabled: false
+  image:
+    name: ""
+    tag: ""
+  # hourly
+  schedule: "0 * * * *"
+  # kill a run if it exceeds this (mview recreation can take a while)
+  activeDeadlineSeconds: 5400
+  env:
+    TILER_MONITORING_NIM_NUMBER_LANGUAGES: 5
+    TILER_MONITORING_FORCE_LANGUAGES_GENERATION: "false"
+  resources:
+    enabled: false
+    requests:
+      memory: "128Mi"
+      cpu: "0.1"
+    limits:
+      memory: "256Mi"
+      cpu: "0.25"
+  nodeSelector:
+    enabled: false
+    label_key: nodegroup_type
+    label_value: web
+
 # ====================================================================================================
 # Variables for tiler-server cache cleaner, only avaliable in case the TILER_CACHE_TYPE = s3
 # ====================================================================================================
-tilerServerCacheCleaner:
-  enabled: false
-  priorityClass: "medium-priority"
-  replicaCount: 1
-  command: "./tile_cache_downloader.sh & ./expire-watcher.sh"
-  resources:
-    enabled: false
-    requests:
-      enabled: false
-      memory: "1Gi"
-      cpu: "2"
-    limits:
-      enabled: false
-      memory: "2Gi"
-      cpu: "2"
-  env:
-    KILL_PROCESS: manually
-    MAX_NUM_PS: 3
-    PROCESS_NAME: tegola
-  nodeSelector:
-    enabled: false
-    label_key: nodegroup_type
-    label_value: tiler
-  autoscaling:
-    enabled: false
-    minReplicas: 1
-    maxReplicas: 2
-    cpuUtilization: 60
-
 tilerCacheCleanerJob:
   enabled: false
+  image:
+    name: ""
+    tag: ""
   priorityClass: "medium-priority"
   tilesFile: imposm/imposm3_expire_dir/latest.tiles
   minZoom: 0
@@ -601,19 +1000,23 @@ tilerCacheCleanerJob:
       enabled: false
       memory: "2Gi"
       cpu: "2"
+  nodeSelector:
+    enabled: false
+    label_key: nodegroup_type
+    label_value: web
+  nodeAffinity:
+    enabled: false
+    key: "nodegroup_type"
+    values: ["web"]
 # ====================================================================================================
 # Variables for Tasking Manager DB
 # ====================================================================================================
 tmDb:
   enabled: false
   image:
-    name: "postgres"
-    tag: "11"
+    name: ""
+    tag: ""
   priorityClass: "medium-priority"
-  nodeSelector:
-    enabled: false
-    label_key: nodegroup_type
-    label_value: web
   env:
     POSTGRES_DB: tm
     POSTGRES_PASSWORD: tm
@@ -632,6 +1035,14 @@ tmDb:
       enabled: false
       memory: "2Gi"
       cpu: "2"
+  nodeSelector:
+    enabled: false
+    label_key: nodegroup_type
+    label_value: web
+  nodeAffinity:
+    enabled: false
+    key: "nodegroup_type"
+    values: ["web"]
 # ====================================================================================================
 # Variables for Tasking Manager API
 # ====================================================================================================
@@ -642,10 +1053,16 @@ tmApi:
     name: ""
     tag: ""
   priorityClass: "medium-priority"
-  nodeSelector:
-    enabled: false
   replicaCount: 1
-  ingressDomain: tm-api.dev.osmseed.org
+  ingress:
+    enabled: false
+    className: ""
+    annotations: {}
+    hosts:
+      - tm-api.osmseed.org
+    tls:
+      enabled: false
+      secretName: ""
   serviceAnnotations: {}
   env:
     POSTGRES_HOST: "tm"
@@ -674,6 +1091,8 @@ tmApi:
     TM_DEFAULT_LOCALE: "en"
     TM_APP_API_URL: ""
     TM_APP_BASE_URL: ""
+    OHSOME_STATS_TOKEN: "dummy-token-for-migrations"
+    POSTGRES_TEST_DB: "postgresql://user:pass@db:5432/test_db"
   resources:
     enabled: false
     requests:
@@ -684,15 +1103,22 @@ tmApi:
       enabled: false
       memory: "2Gi"
       cpu: "2"
-
+  nodeSelector:
+    enabled: false
+    label_key: nodegroup_type
+    label_value: web
+  nodeAffinity:
+    enabled: false
+    key: "nodegroup_type"
+    values: ["web"]
 # ====================================================================================================
 # Nominatim UI, The image need to be update with your own docker image
 # ====================================================================================================
 nominatimUI:
   enabled: false
   image:
-    name: "ghcr.io/openhistoricalmap/nominatim-ui"
-    tag: "a469b5e"
+    name: ""
+    tag: ""
 # ====================================================================================================
 # Variables for nominatim api
 # ====================================================================================================
@@ -704,7 +1130,15 @@ nominatimApi:
   priorityClass: "medium-priority"
   serviceAnnotations: {}
   replicaCount: 1
-  ingressDomain: nominatim-api.dev.osmseed.org
+  ingress:
+    enabled: false
+    className: ""
+    annotations: {}
+    hosts:
+      - nominatim-api.osmseed.org
+    tls:
+      enabled: false
+      secretName: ""
   env:
     PBF_URL: http://download.geofabrik.de/europe/monaco-latest.osm.pbf
     REPLICATION_URL: http://download.geofabrik.de/europe/monaco-updates
@@ -718,9 +1152,12 @@ nominatimApi:
     THREADS: 4
     NOMINATIM_PASSWORD: psw1234
     PGDATA: /var/lib/postgresql/14/main
-    NOMINATIM_ADDRESS_LEVEL_CONFIG_URL: https://gist.githubusercontent.com/lonvia/8502c61b3dd159e67eb8be8368d864c1/raw/d05a1d681230632bb2e35cbf363f2baec8acd657/address-levels.json
+    NOMINATIM_ADDRESS_LEVEL_CONFIG_URL: 
+      https://gist.githubusercontent.com/lonvia/8502c61b3dd159e67eb8be8368d864c1/raw/d05a1d681230632bb2e35cbf363f2baec8acd657/address-levels.json
     UPDATE_MODE: continuous #Options: `continuous`/`once`/`catch-up`/`none` (default: `none`)
     OSMSEED_WEB_API_DOMAIN: www.openstreetmap.org
+    # Public host the UI calls for the Nominatim API. Should match ingress.hosts[0].
+    NOMINATIM_API_ENDPOINT: nominatim-api.osmseed.org
   resources:
     enabled: false
     requests:
@@ -736,17 +1173,22 @@ nominatimApi:
     accessMode: ReadWriteOnce
     mountPath: /var/lib/postgresql/14/main
     subPath: nominatim-pgdata
-    # Minikube
+    # k3s: staticHostPath=true uses a fixed hostPath dir (reusable across releases); false = dynamic local-path
+    staticHostPath: false
     localVolumeHostPath: /mnt/nominatim-db-data
     localVolumeSize: 10Gi
     # AWS
     AWS_ElasticBlockStore_volumeID: vol-0403ccb65fb4a85e9
     AWS_ElasticBlockStore_size: 100Gi
-    # GCP
-    GCP_gcePersistentDisk_pdName: osmseed-disk-nominatim_db-v1
-    GCP_gcePersistentDisk_size: 50Gi
   nodeSelector:
     enabled: false
+    label_key: nodegroup_type
+    label_value: web
+  nodeAffinity:
+    enabled: false
+    key: "nodegroup_type"
+    values: ["web"]
+
 # ====================================================================================================
 # Variables for overpass-api
 # ====================================================================================================
@@ -757,29 +1199,36 @@ overpassApi:
     tag: ""
   priorityClass: "medium-priority"
   serviceAnnotations: {}
-  ingressDomain: overpass-api.dev.osmseed.org
+  ingress:
+    enabled: false
+    className: ""
+    annotations: {}
+    hosts:
+      - overpass-api.osmseed.org
+    tls:
+      enabled: false
+      secretName: ""
   env:
     OVERPASS_META: "yes"
     OVERPASS_MODE: init
     OVERPASS_PLANET_URL: http://download.geofabrik.de/europe/monaco-latest.osm.bz2
     OVERPASS_DIFF_URL: http://download.openstreetmap.fr/replication/europe/monaco/minute/
     OVERPASS_RULES_LOAD: 10
-    OVERPASS_PLANET_PREPROCESS: 'mv /db/planet.osm.bz2 /db/planet.osm.pbf && osmium cat -o /db/planet.osm.bz2 /db/planet.osm.pbf && rm /db/planet.osm.pbf'
+    OVERPASS_PLANET_PREPROCESS: 'mv /db/planet.osm.bz2 /db/planet.osm.pbf && osmium
+      cat -o /db/planet.osm.bz2 /db/planet.osm.pbf && rm /db/planet.osm.pbf'
     OVERPASS_REPLICATION_SEQUENCE_NUMBER: 5201000
     OVERPASS_ALLOW_DUPLICATE_QUERIES: "yes"
   persistenceDisk:
     enabled: false
     accessMode: ReadWriteOnce
     mountPath: /db
-    # Minikube
+    # k3s: staticHostPath=true uses a fixed hostPath dir (reusable across releases); false = dynamic local-path
+    staticHostPath: false
     localVolumeHostPath: /mnt/overpass-api-db-data
     localVolumeSize: 10Gi
     # AWS
     AWS_ElasticBlockStore_volumeID: vol-1234bcd
     AWS_ElasticBlockStore_size: 50Gi
-    # GCP
-    GCP_gcePersistentDisk_pdName: osmseed-disk-overpass-v1
-    GCP_gcePersistentDisk_size: 50Gi
   resources:
     enabled: false
     requests:
@@ -792,27 +1241,89 @@ overpassApi:
       cpu: "2"
   nodeSelector:
     enabled: false
+    label_key: nodegroup_type
+    label_value: web
+  nodeAffinity:
+    enabled: false
+    key: "nodegroup_type"
+    values: ["web"]
 # ====================================================================================================
 # Variables for taginfo
 # ====================================================================================================
-taginfo:
+# ====================================================================================================
+# taginfo - web frontend (HTTP server)
+# ====================================================================================================
+taginfoWeb:
   enabled: false
   image:
     name: ""
     tag: ""
+  replicas: 1
   priorityClass: "medium-priority"
+  serviceAccount:
+    enabled: false
+    name: ""
   serviceAnnotations: {}
-  ingressDomain: taginfo-dev.staging.openhistoricalmap.org
+  ingress:
+    enabled: false
+    className: ""
+    annotations: {}
+    hosts:
+      - taginfo-dev.staging.openhistoricalmap.org
+    tls:
+      enabled: false
+      secretName: ""
+  env:
+    OVERWRITE_CONFIG_URL: ""
+    TAGINFO_DB_BASE_URL: https://planet.openhistoricalmap.org.s3.amazonaws.com/taginfo
+    ENVIRONMENT: development
+    FETCH_DB_FILES: "false"
+    INSTANCE_NAME: "OHM Taginfo"
+    INSTANCE_DESCRIPTION: "This is a taginfo test instance"
+    INSTANCE_ICON: /img/logo/world.png
+    INSTANCE_CONTACT: Anonymous
+  resources:
+    enabled: false
+    requests:
+      enabled: false
+      memory: "1Gi"
+      cpu: "500m"
+    limits:
+      enabled: false
+      memory: "2Gi"
+      cpu: "2"
+  nodeSelector:
+    enabled: false
+    label_key: nodegroup_type
+    label_value: web
+  nodeAffinity:
+    enabled: false
+    key: "nodegroup_type"
+    values: ["web"]
+
+# ====================================================================================================
+# taginfo - data processor (CronJob: downloads planet, builds DBs, uploads S3)
+# ====================================================================================================
+taginfoDataProcessor:
+  enabled: false
+  image:
+    name: ""
+    tag: ""
+  schedule: "0 2 */3 * *"
+  activeDeadlineSeconds: 86400
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  priorityClass: "medium-priority"
+  serviceAccount:
+    enabled: false
+    name: ""
   env:
     URL_PLANET_FILE_STATE: https://planet.osm.org/pbf/state.txt
     URL_HISTORY_PLANET_FILE_STATE: https://planet.osm.org/pbf/full-history/state.txt
     URL_PLANET_FILE: https://planet.osm.org/pbf/planet-latest.osm.pbf
     URL_HISTORY_PLANET_FILE: https://planet.osm.org/pbf/full-history/history-latest.osm.pbf
     TIME_UPDATE_INTERVAL: 24h
-    INSTANCE_NAME: OHM Taginfo
-    INSTANCE_DESCRIPTION: "This is a <b>taginfo test instance</b>"
-    INSTANCE_ICON: /img/logo/world.png
-    INSTANCE_CONTACT: Anonymous
     TAGINFO_PROJECT_REPO: https://github.com/taginfo/taginfo-projects.git
     DOWNLOAD_DB: "languages wiki"
     CREATE_DB: "db projects chronology"
@@ -823,31 +1334,20 @@ taginfo:
     enabled: false
     requests:
       enabled: false
-      memory: "1Gi"
-      cpu: "2"
+      memory: "13Gi"
+      cpu: "3600m"
     limits:
       enabled: false
-      memory: "2Gi"
-      cpu: "2"
+      memory: "14Gi"
+      cpu: "3800m"
   nodeSelector:
-    enabled: true
+    enabled: false
     label_key: nodegroup_type
-    label_value: web
-  cronjob:
-      enabled: true
-      schedule: "0 2 */3 * *"
-      nodeSelector:
-        enabled: true
-        label_key: nodegroup_type
-        label_value: job_xlarge
-      resources:
-        enabled: false
-        requests:
-          memory: "13Gi"
-          cpu: "3600m"
-        limits:
-          memory: "14Gi"
-          cpu: "3800m"
+    label_value: job
+  nodeAffinity:
+    enabled: false
+    key: "nodegroup_type"
+    values: ["job"]
 # ====================================================================================================
 # Variables for osm-simple-metrics
 # ====================================================================================================
@@ -856,6 +1356,9 @@ osmSimpleMetrics:
   image:
     name: ""
     tag: ""
+  serviceAccount:
+    enabled: true
+    name: ohm-web-s3-bucket-access-staging
   priorityClass: "medium-priority"
   schedule: "* */1 * * *"
   resources:
@@ -870,15 +1373,24 @@ osmSimpleMetrics:
       cpu: "2"
   nodeSelector:
     enabled: false
+    label_key: nodegroup_type
+    label_value: web
+  nodeAffinity:
+    enabled: false
+    key: "nodegroup_type"
+    values: ["web"]
 # ====================================================================================================
 # Variables for osm-simple-metrics
 # ====================================================================================================
 monitoringReplication:
   enabled: false
   image:
-    name: "developmentseed/osmseed-replication-job"
-    tag: "0.1.0-n770.hd15c9f2"
+    name: ""
+    tag: ""
   priorityClass: "medium-priority"
+  serviceAccount:
+    enabled: true
+    name: ohm-web-s3-bucket-access-staging
   schedule: "* */1 * * *"
   env:
     CREATE_MISSING_FILES: empty
@@ -895,6 +1407,12 @@ monitoringReplication:
       cpu: "2"
   nodeSelector:
     enabled: false
+    label_key: nodegroup_type
+    label_value: web
+  nodeAffinity:
+    enabled: false
+    key: "nodegroup_type"
+    values: ["web"]
 # ====================================================================================================
 # Variables for changeset-replication-job, Configuration to create the replication files by, minute, hour, or day
 # ====================================================================================================
@@ -903,6 +1421,9 @@ changesetReplicationJob:
   image:
     name: ""
     tag: ""
+  serviceAccount:
+    enabled: true
+    name: ohm-web-s3-bucket-access-staging
   priorityClass: "medium-priority"
   resources:
     enabled: false
@@ -916,6 +1437,13 @@ changesetReplicationJob:
       cpu: "2"
   nodeSelector:
     enabled: false
+    label_key: nodegroup_type
+    label_value: web
+  nodeAffinity:
+    enabled: false
+    key: "nodegroup_type"
+    values: ["web"]
+
 # ====================================================================================================
 # Variables for osmcha web builder
 # ====================================================================================================
@@ -930,17 +1458,23 @@ osmchaWeb:
 osmchaApi:
   enabled: false
   image:
-    name: "ghcr.io/osmcha/osmcha-django"
-    tag: "61a80e897b45fb9b1a177bf433fb79bfa7fda59d"
-  ingressDomain: osmcha.dev.osmseed.org
+    name: ""
+    tag: ""
+  serviceAnnotations: {}
+  ingress:
+    enabled: false
+    className: ""
+    annotations: {}
+    hosts:
+      - osmcha.osmseed.org
+    tls:
+      enabled: false
+      secretName: ""
   priorityClass: "medium-priority"
   env:
     DJANGO_SETTINGS_MODULE: "config.settings.production"
     OSMCHA_FRONTEND_VERSION: "v0.86.0-production"
     DJANGO_SECRET_KEY: abc
-    ## ohm
-    # OAUTH_OSM_KEY: abc
-    # OAUTH_OSM_SECRET: bdc
     DJANGO_SECURE_SSL_REDIRECT: "False"
     OSM_SERVER_URL: https://www.osmseed.org
     OAUTH_REDIRECT_URI: https://osmcha-staging.osmseed.org/oauth-landing.html
@@ -948,11 +1482,6 @@ osmchaApi:
     ## frontend
     OSMCHA_URL: https://osmcha-staging.osmseed.org
     OSMCHA_API_URL: www.osmseed.org
-    # REACT_APP_OSM_URL: https://www.osmseed.org
-    # REACT_APP_OSM_API: https://www.osmseed.org/api/0.6
-    # REACT_APP_OVERPASS_BASE: //overpass-api.osmseed.org/api/interpreter
-    # REACT_APP_DISABLE_REAL_CHANGESETS: 1
-    # REACT_APP_MAPBOX_ACCESS_TOKEN: "pk.abc.df"
     OAUTH2_OSM_KEY: abc
     OAUTH2_OSM_SECRET: xyz
   resources:
@@ -968,7 +1497,11 @@ osmchaApi:
   nodeSelector:
     enabled: false
     label_key: nodegroup_type
-    label_value: db
+    label_value: web
+  nodeAffinity:
+    enabled: false
+    key: "nodegroup_type"
+    values: ["web"]
   fetch_changesets_cronjob: "*/2 * * * *"
   process_changesets_cronjob: "*/2 * * * *"
 # ====================================================================================================
@@ -998,44 +1531,21 @@ osmchaDb:
     enabled: false
     accessMode: ReadWriteOnce
     mountPath: /var/lib/postgresql/data
-    # Minikube
+    # k3s: staticHostPath=true uses a fixed hostPath dir (reusable across releases); false = dynamic local-path
+    staticHostPath: false
     localVolumeHostPath: /mnt/db-data/osmcha-data
     localVolumeSize: 10Gi
     # AWS
     AWS_ElasticBlockStore_volumeID: vol-1234bcd
     AWS_ElasticBlockStore_size: 50Gi
-    # GCP
-    GCP_gcePersistentDisk_pdName: osmseed-osmcha-disk--v1
-    GCP_gcePersistentDisk_size: 50Gi
   nodeSelector:
     enabled: false
-
-# ====================================================================================================
-# Variables for osmcha DB
-# ====================================================================================================
-adiffService:
-  enabled: false
-  image:
-    name: "ghcr.io/osmcha/osm-adiff-service"
-    tag: "b0b2bcaf1d7428e48146c70ea80e129fcd864686"
-  priorityClass: "medium-priority"
-  env:
-    OSMCHAADMINTOKEN: abc
-    REDIS_URL: postgres
-    WORKER_COUNT: 2
-    NODE_OPTIONS: --max-old-space-size=8192
-  resources:
+    label_key: nodegroup_type
+    label_value: web
+  nodeAffinity:
     enabled: false
-    requests:
-      enabled: false
-      memory: "1Gi"
-      cpu: "2"
-    limits:
-      enabled: false
-      memory: "2Gi"
-      cpu: "2"
-  nodeSelector:
-    enabled: false
+    key: "nodegroup_type"
+    values: ["web"]
 
 # ====================================================================================================
 # Planet server files
@@ -1045,4 +1555,49 @@ planetFiles:
   image:
     name: ""
     tag: ""
-  priorityClass: "low-priority"
+
+level0:
+  enabled: true
+  image:
+    name: ""
+    tag: ""
+  replicas: 1
+  priorityClass: "medium-priority"
+  serviceAccount:
+    enabled: false
+    name: ""
+  serviceAnnotations: {}
+  ingress:
+    enabled: false
+    className: ""
+    annotations: {}
+    hosts:
+      - level0-dev.openstreetmap.org
+    tls:
+      enabled: false
+      secretName: ""
+  env:
+    OSM_WEBSITE_URL: https://www.openstreetmap.org
+    OSM_API_URL: https://www.openstreetmap.org/api/0.6/
+    OAUTH2_CLIENT_ID: "xyz"
+    OAUTH2_CLIENT_SECRET: "abc"
+    OVERPASS_API: "overpass-api.oenstreetmap.org"
+    MAX_REQUEST_OBJECTS: "500"
+  resources:
+    enabled: false
+    requests:
+      enabled: false
+      memory: "256Mi"
+      cpu: "100m"
+    limits:
+      enabled: false
+      memory: "512Mi"
+      cpu: "1"
+  nodeSelector:
+    enabled: false
+    label_key: nodegroup_type
+    label_value: web
+  nodeAffinity:
+    enabled: false
+    key: "nodegroup_type"
+    values: ["web"]

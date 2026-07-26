@@ -26,7 +26,12 @@ spec:
       initContainers:
         - name: db-upgrade
           image: "{{ .Values.tmApi.image.name }}:{{ .Values.tmApi.image.tag }}"
-          command: ["flask", "db", "upgrade"]
+          command:
+            - alembic
+            - -c
+            - /usr/src/app/migrations/alembic.ini
+            - upgrade
+            - head
           envFrom:
             - configMapRef:
                 name: {{ .Release.Name }}-tm-common-env
@@ -63,5 +68,19 @@ spec:
       {{- if .Values.tmApi.nodeSelector.enabled }}
       nodeSelector:
         {{ .Values.tmApi.nodeSelector.label_key }} : {{ .Values.tmApi.nodeSelector.label_value }}
+      {{- end }}
+      # Affinity settings
+      {{- if .Values.tmApi.nodeAffinity.enabled }}
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: {{ .Values.tmApi.nodeAffinity.key }}
+                    operator: In
+                    values:
+                    {{- range .Values.tmApi.nodeAffinity.values }}
+                      - {{ . | quote }}
+                    {{- end }}
       {{- end }}
 {{- end }}

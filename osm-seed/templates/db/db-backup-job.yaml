@@ -16,8 +16,13 @@ spec:
   concurrencyPolicy: Forbid
   jobTemplate:
     spec:
+      ttlSecondsAfterFinished: 300
       template:
         spec:
+          {{- if $job.serviceAccount.enabled }}
+          serviceAccountName: {{ $job.serviceAccount.name }}
+          automountServiceAccountToken: true
+          {{- end }}
           containers:
           - name: {{ $job.name }}-backup-job
             image: {{ $.Values.dbBackupRestore.image.name }}:{{ $.Values.dbBackupRestore.image.tag }}
@@ -46,6 +51,10 @@ spec:
                 value: {{ $job.env.BACKUP_CLOUD_FILE }}
               - name: AWS_S3_BUCKET
                 value: {{ $job.env.AWS_S3_BUCKET }}
+              # Minute replication stream. The backup reads its state.txt to store
+              # the seqno next to the dump, so planet dumps know their position.
+              - name: MINUTE_REPLICATION_URL
+                value: {{ $job.env.MINUTE_REPLICATION_URL }}
               # Clean up options
               - name: CLEANUP_BACKUPS
                 value: {{ quote $job.env.CLEANUP_BACKUPS }}
@@ -153,6 +162,19 @@ spec:
           {{- if $job.nodeSelector.enabled }}
           nodeSelector:
             {{ $job.nodeSelector.label_key }} : {{ $job.nodeSelector.label_value }}
+          {{- end }}
+          {{- if $job.nodeAffinity.enabled }}
+          affinity:
+            nodeAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+                nodeSelectorTerms:
+                  - matchExpressions:
+                      - key: {{ $job.nodeAffinity.key }}
+                        operator: In
+                        values:
+                        {{- range $job.nodeAffinity.values }}
+                          - {{ . | quote }}
+                        {{- end }}
           {{- end }}
 ---
 {{- end }}

@@ -1,82 +1,171 @@
 #!/usr/bin/env bash
-set -e
+set -ex
+
 export VOLUME_DIR=/mnt/data
+export PLANET_EPOCH_DATE="${PLANET_EPOCH_DATE:-2004-01-01}"
 
-# osmosis tuning: https://wiki.openstreetmap.org/wiki/Osmosis/Tuning,https://lists.openstreetmap.org/pipermail/talk/2012-October/064771.html
-if [ -z "$MEMORY_JAVACMD_OPTIONS" ]; then
-	echo JAVACMD_OPTIONS=\"-server\" >~/.osmosis
-else
-	memory="${MEMORY_JAVACMD_OPTIONS//i/}"
-	echo JAVACMD_OPTIONS=\"-server -Xmx$memory\" >~/.osmosis
-fi
-
-# Fixing name for historical file
-date=$(date '+%y%m%d_%H%M')
-local_fullHistoryFile=$VOLUME_DIR/history-${date}.osh.pbf
-cloud_fullHistoryFile=planet/full-history/history-${date}.osh.pbf
-
-# In case overwrite the file
-if [ "$OVERWRITE_FHISTORY_FILE" == "true" ]; then
-	local_fullHistoryFile=$VOLUME_DIR/history-latest.osh.pbf
-	cloud_fullHistoryFile=planet/full-history/history-latest.osh.pbf
-fi
-
-# State file nname
+folder_planetHistoryPBFFile=planet/full-history
 stateFile="$VOLUME_DIR/state.txt"
-osm_tmp_file="osm_tmp.osm"
+dumpFile="$VOLUME_DIR/input-latest.dump"
+sidecarFile="$VOLUME_DIR/input-latest.state.txt"   # seqno captured at backup time
 
-# Creating full history
-osmosis --read-apidb-change \
-	host=$POSTGRES_HOST \
-	database=$POSTGRES_DB \
-	user=$POSTGRES_USER \
-	password=$POSTGRES_PASSWORD \
-	validateSchemaVersion=no \
-	readFullHistory=yes \
-	--write-xml-change \
-	compressionMethod=auto \
-	$osm_tmp_file
+# Filled from the sidecar (the dump's replication position + stream URL). Empty if missing.
+SEQNO=""
+SEQNO_TS=""
+BASE_URL=""
+# Date taken from the backup filename, so the planet keeps the backup's name.
+BACKUP_DATE=""
 
-# Convert file to PBF file
-osmium cat $osm_tmp_file -o $local_fullHistoryFile
-osmium fileinfo $local_fullHistoryFile
+# ===============================
+# Download db .dump file + seqno sidecar
+# ===============================
+download_dump_file() {
+    echo "Downloading db .dump file from cloud..."
 
-# Remove full-hitory osm file, keep only history-latest.osh.pbf files
-rm $osm_tmp_file
+    local temp_dump_file="$dumpFile.tmp"
+    local actual_dump_url=""
 
-# AWS
-if [ $CLOUDPROVIDER == "aws" ]; then
+    if [[ "$DUMP_CLOUD_URL" == *.txt ]]; then
+        temp_txt="$VOLUME_DIR/tmp_dump_url.txt"
+        aws s3 cp "$DUMP_CLOUD_URL" "$temp_txt"
+
+        # Get the first line (S3 URL to the .dump file)
+        actual_dump_url=$(head -n 1 "$temp_txt")
+        echo "Found dump URL in txt: $actual_dump_url"
+
+        aws s3 cp "$actual_dump_url" "$temp_dump_file"
+        rm -f "$temp_txt"
+    else
+        actual_dump_url="$DUMP_CLOUD_URL"
+        aws s3 cp "$DUMP_CLOUD_URL" "$temp_dump_file"
+    fi
+
+    # The backup writes a <base>.state.txt sidecar next to <base>.dump.gz. Pull it
+    # so we can stamp the exact seqno into the planet. Missing sidecar is fine: the
+    # planet just ships without a seqno and consumers fall back to their own logic.
+    local base="${actual_dump_url%.dump.gz}"
+    base="${base%.dump}"
+    local sidecar_url="${base}.state.txt"
+
+    # Reuse the backup's date (YYYYMMDD-HHMM in its filename) so the planet shares
+    # the same name. Empty if the backup doesn't date its files.
+    BACKUP_DATE=$(basename "$actual_dump_url" | grep -oE '[0-9]{8}-[0-9]{4}' | head -1)
+
+    if aws s3 cp "$sidecar_url" "$sidecarFile" 2>/dev/null; then
+        echo "Found seqno sidecar:"
+        cat "$sidecarFile"
+        SEQNO=$(awk -F= '/sequenceNumber/{print $2}' "$sidecarFile" | tr -d ' \r')
+        # osmosis state.txt escapes the colons (2026-06-08T00\:00\:16Z); unescape them.
+        SEQNO_TS=$(awk -F= '/^timestamp/{print $2}' "$sidecarFile" | tr -d ' \r' | sed 's/\\//g')
+        BASE_URL=$(awk -F= '/replicationBaseUrl/{print $2}' "$sidecarFile" | tr -d ' \r')
+        echo "Parsed seqno=$SEQNO timestamp=$SEQNO_TS baseUrl=$BASE_URL"
+    else
+        echo "No seqno sidecar at $sidecar_url; planet will have no sequence number"
+        rm -f "$sidecarFile"
+    fi
+
+    # Check if downloaded file is gzip compressed and decompress if needed
+    # Check by file extension, file type, or magic bytes
+    local is_gzip=false
+    if [[ "$actual_dump_url" == *.gz ]] || [[ "$temp_dump_file" == *.gz ]]; then
+        is_gzip=true
+    elif command -v file >/dev/null 2>&1 && file "$temp_dump_file" 2>/dev/null | grep -q "gzip compressed"; then
+        is_gzip=true
+    elif head -c 2 "$temp_dump_file" 2>/dev/null | od -An -tx1 | grep -q "1f 8b"; then
+        # Check for gzip magic bytes (1f 8b)
+        is_gzip=true
+    fi
+
+    if [ "$is_gzip" = true ]; then
+        echo "Detected gzip compressed dump file, decompressing..."
+        gunzip -c "$temp_dump_file" > "$dumpFile"
+        rm -f "$temp_dump_file"
+    else
+        mv "$temp_dump_file" "$dumpFile"
+    fi
+
+    echo "Dump file ready at: $dumpFile (PostgreSQL 17 compatible)"
+}
+
+# ===============================
+# Upload planet + state
+# ===============================
+upload_planet_file() {
+	echo "Uploading history planet file and updating state.txt..."
+
 	AWS_URL=${AWS_S3_BUCKET/s3:\/\//http:\/\/}
-	echo "$AWS_URL.s3.amazonaws.com/$cloud_fullHistoryFile" >$stateFile
-	# Upload history-planet.osm.pbf
-	aws s3 cp $local_fullHistoryFile $AWS_S3_BUCKET/$cloud_fullHistoryFile --acl public-read
-	# Upload state.txt
-	aws s3 cp $stateFile $AWS_S3_BUCKET/planet/full-history/state.txt --acl public-read
+	echo "$AWS_URL.s3.amazonaws.com/$cloud_planetHistoryPBFFile" > "$stateFile"
+	aws s3 cp "$local_planetHistoryPBFFile" "$AWS_S3_BUCKET/$cloud_planetHistoryPBFFile" --acl public-read
+	aws s3 cp "$stateFile" "$AWS_S3_BUCKET/${folder_planetHistoryPBFFile}/state.txt" --acl public-read
+
+	# Publish the planet's own state.txt (seqno + timestamp) next to the PBF, the
+	# same way OSM does. osmx reads the header, but this is handy for other tools.
+	if [ -f "$companionStateFile" ]; then
+		aws s3 cp "$companionStateFile" "$AWS_S3_BUCKET/${cloud_planetHistoryPBFFile%.osm.pbf}.state.txt" --acl public-read
+	fi
+}
+
+# ===============================
+# Generate planet file
+# ===============================
+download_dump_file
+
+# Name the planet after the backup it came from, so the two stay in sync. The
+# backup date is YYYYMMDD-HHMM; reformat it to yymmdd_HHMM. Fall back to the dump's
+# data timestamp, then to wall-clock, if the backup wasn't dated.
+if [ -n "$BACKUP_DATE" ]; then
+    date=$(echo "$BACKUP_DATE" | sed -E 's/^[0-9]{2}([0-9]{6})-([0-9]{4})/\1_\2/')
+elif [ -n "$SEQNO_TS" ]; then
+    date=$(echo "$SEQNO_TS" | sed -E 's/^[0-9]{2}([0-9]{2})-([0-9]{2})-([0-9]{2})T([0-9]{2}):([0-9]{2}).*/\1\2\3_\4\5/')
+else
+    date=$(date '+%y%m%d_%H%M')
 fi
 
-# Google Storage
-if [ $CLOUDPROVIDER == "gcp" ]; then
-	echo "https://storage.cloud.google.com/$GCP_STORAGE_BUCKET/$cloud_fullHistoryFile" >$stateFile
-	# Upload history-planet.osm.pbf
-	gsutil cp -a public-read $local_fullHistoryFile $GCP_STORAGE_BUCKET/$cloud_fullHistoryFile
-	# Upload state.txt
-	gsutil cp -a public-read $stateFile $GCP_STORAGE_BUCKET/planet/full-history/state.txt
+local_planetHistoryPBFFile=$VOLUME_DIR/planet-history-${date}.osm.pbf
+cloud_planetHistoryPBFFile=${folder_planetHistoryPBFFile}/planet-history-${date}.osm.pbf
+companionStateFile=$VOLUME_DIR/planet-history-${date}.state.txt
+
+# If overwrite flag is enabled, use fixed filenames
+if [ "$OVERWRITE_PLANET_FILE" == "true" ]; then
+	local_planetHistoryPBFFile=$VOLUME_DIR/planet-history-latest.osm.pbf
+	cloud_planetHistoryPBFFile=planet/planet-history-latest.osm.pbf
+	companionStateFile=$VOLUME_DIR/planet-history-latest.state.txt
 fi
 
-# Azure
-if [ $CLOUDPROVIDER == "azure" ]; then
-	# Save the path file
-	echo "https://$AZURE_STORAGE_ACCOUNT.blob.core.windows.net/$AZURE_CONTAINER_NAME/$cloud_fullHistoryFile" >$stateFile
-	# Upload history-planet.osm.pbf
-	az storage blob upload \
-        --container-name $AZURE_CONTAINER_NAME \
-        --file $local_fullHistoryFile \
-        --name $cloud_fullHistoryFile \
-        --output table
-	# Upload state.txt
-	az storage blob upload \
-        --container-name $AZURE_CONTAINER_NAME \
-        --file $stateFile \
-        --name planet/full-history/state.txt \
-        --output table
+echo "Generating history planet file with planet-dump-ng..."
+export PLANET_EPOCH_DATE="$PLANET_EPOCH_DATE"
+
+if [ -n "$PLANET_DUMP_NG_METADATA_URL" ]; then
+    echo "Downloading metadata file..."
+    curl "$PLANET_DUMP_NG_METADATA_URL" -o metadata.yml
+    planet-dump-ng \
+        --dump-file "$dumpFile" \
+        --history-pbf "$local_planetHistoryPBFFile" \
+        -M metadata.yml
+else
+    planet-dump-ng \
+        --dump-file "$dumpFile" \
+        --history-pbf "$local_planetHistoryPBFFile"
 fi
+
+# planet-dump-ng writes the replication timestamp but not the sequence number.
+# Stamp the seqno we captured at backup time into the header so osmx can expand
+# the planet and resume replication on its own. Also drop a companion state.txt.
+if [ -n "$SEQNO" ]; then
+    echo "Writing seqno=$SEQNO into the history planet header"
+    headerArgs=(--output-header=osmosis_replication_sequence_number="$SEQNO")
+    [ -n "$BASE_URL" ] && headerArgs+=(--output-header=osmosis_replication_base_url="$BASE_URL")
+    osmium cat "$local_planetHistoryPBFFile" -o "$local_planetHistoryPBFFile.tmp.pbf" "${headerArgs[@]}"
+    mv "$local_planetHistoryPBFFile.tmp.pbf" "$local_planetHistoryPBFFile"
+
+    {
+        echo "sequenceNumber=$SEQNO"
+        [ -n "$SEQNO_TS" ] && echo "timestamp=$SEQNO_TS"
+        [ -n "$BASE_URL" ] && echo "replicationBaseUrl=$BASE_URL"
+    } > "$companionStateFile"
+else
+    echo "WARNING: no seqno captured; planet header left without a sequence number"
+fi
+
+# Upload results
+upload_planet_file

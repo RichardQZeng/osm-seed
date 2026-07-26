@@ -16,8 +16,13 @@ spec:
   concurrencyPolicy: Forbid
   jobTemplate:
     spec:
+      ttlSecondsAfterFinished: 300
       template:
         spec:
+          {{- if .Values.fullHistory.serviceAccount.enabled }}
+          serviceAccountName: {{ .Values.fullHistory.serviceAccount.name }}
+          automountServiceAccountToken: true
+          {{- end }}
           containers:
           - name: {{ .Release.Name }}-full-history-job
             image: {{ .Values.fullHistory.image.name }}:{{ .Values.fullHistory.image.tag }}
@@ -44,6 +49,14 @@ spec:
                 value: {{ .Values.fullHistory.env.OVERWRITE_FHISTORY_FILE | quote}}
               - name: CLOUDPROVIDER
                 value: {{ .Values.cloudProvider }}
+              - name: PLANET_EXPORT_METHOD
+                value: {{ .Values.fullHistory.env.PLANET_EXPORT_METHOD | quote}}
+              - name: DUMP_CLOUD_URL
+                value: {{ .Values.fullHistory.env.DUMP_CLOUD_URL | quote}}
+              - name: PLANET_EPOCH_DATE
+                value: {{ .Values.fullHistory.env.PLANET_EPOCH_DATE | quote}}
+              - name: PLANET_DUMP_NG_METADATA_URL
+                value: {{ .Values.fullHistory.env.PLANET_DUMP_NG_METADATA_URL | quote}}
               # In case cloudProvider=aws
               {{- if eq .Values.cloudProvider "aws" }}
               - name: AWS_S3_BUCKET
@@ -72,6 +85,20 @@ spec:
           {{- if .Values.fullHistory.nodeSelector.enabled }}
           nodeSelector:
             {{ .Values.fullHistory.nodeSelector.label_key }} : {{ .Values.fullHistory.nodeSelector.label_value }}
+          {{- end }}
+          # Affinity settings
+          {{- if .Values.fullHistory.nodeAffinity.enabled }}
+          affinity:
+            nodeAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+                nodeSelectorTerms:
+                  - matchExpressions:
+                      - key: {{ .Values.fullHistory.nodeAffinity.key }}
+                        operator: In
+                        values:
+                        {{- range .Values.fullHistory.nodeAffinity.values }}
+                          - {{ . | quote }}
+                        {{- end }}
           {{- end }}
       backoffLimit: 3
 {{- end }}

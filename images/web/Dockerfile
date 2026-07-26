@@ -1,111 +1,169 @@
-FROM ubuntu:22.04
-ENV DEBIAN_FRONTEND=noninteractive
-ENV workdir /var/www
+FROM ruby:3.3-slim AS builder
 
-# Production OSM setup
-ENV RAILS_ENV=production
+ENV DEBIAN_FRONTEND=noninteractive \
+    workdir=/var/www \
+    BUNDLE_PATH=/usr/local/bundle \
+    GEM_HOME=/usr/local/bundle \
+    GEM_PATH=/usr/local/bundle \
+    PATH="/usr/local/bundle/bin:$PATH" \
+    RAILS_ENV=production
 
-# Install the openstreetmap-website dependencies
-RUN apt-get update \
-    && apt-get install -y \
-    ruby ruby-dev ruby-bundler libmagickwand-dev libxml2-dev libxslt1-dev \
-    apache2 apache2-dev build-essential git-core postgresql-client \
-    libpq-dev libsasl2-dev imagemagick libffi-dev libgd-dev libarchive-dev libbz2-dev curl \
-    default-jre-headless file gpg-agent libvips-dev locales software-properties-common tzdata unzip \
-    advancecomp gifsicle libjpeg-progs jhead jpegoptim optipng pngcrush pngquant libyaml-dev \
-    && apt-get clean \
-    && rm -rf /var/lib/apt/lists/*
-
-## Install node
-RUN curl -sL https://deb.nodesource.com/setup_18.x | bash -
-RUN curl -sS https://dl.yarnpkg.com/debian/pubkey.gpg | apt-key add -
-RUN echo "deb https://dl.yarnpkg.com/debian/ stable main" | tee /etc/apt/sources.list.d/yarn.list
-RUN apt-get update && apt-get install -y nodejs yarn && \
-    apt-get clean && \
-    rm -rf /var/lib/apt/lists/*
-
-# Install openstreetmap-cgimap requirements
-RUN apt-get update &&  apt-get -y install libxml2-dev libpqxx-dev libfcgi-dev zlib1g-dev libbrotli-dev \
-  libboost-program-options-dev libfmt-dev libmemcached-dev libcrypto++-dev \
-  libargon2-dev libyajl-dev cmake libapache2-mod-fcgid && \
-  apt-get clean && \
-  rm -rf /var/lib/apt/lists/*
-
-# Install cgimap, before remove basic auth
-ENV cgimap /openstreetmap-cgimap
-ENV CGIMAP_GITSHA=26cd7fa10affe5dbd13dbe16de34421059f53f18
-RUN git clone -b master https://github.com/zerebubuth/openstreetmap-cgimap.git $cgimap \
-    && cd $cgimap \
-    && git checkout $CGIMAP_GITSHA \
-    && rm -rf .git \
-    && mkdir build \
-    && cd build \
-    && cmake .. \
-    && cmake --build .
-
-# Install svgo required
-RUN npm install -g svgo
-
-# Install openstreetmap-website
-RUN rm -rf $workdir/html
-
-## Sep 2023
-ENV OPENSTREETMAP_WEBSITE_GITSHA=d23763d6cdbf5ec11f0e83f8e6e8fb32ed973e6a
-RUN curl -L https://github.com/openstreetmap/openstreetmap-website/archive/$OPENSTREETMAP_WEBSITE_GITSHA.zip --output website.zip && unzip website.zip 
-RUN mv openstreetmap-website-$OPENSTREETMAP_WEBSITE_GITSHA/* $workdir/
 WORKDIR $workdir
 
-# Install Ruby packages
-RUN gem install bundler && bundle install
+# Install base build dependencies
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+    git curl gnupg build-essential \
+    libarchive-dev zlib1g-dev libcurl4-openssl-dev \
+    apache2 apache2-dev libapache2-mod-fcgid libapr1-dev libaprutil1-dev \
+    postgresql-client libpq-dev libxml2-dev libyaml-dev \
+    libgd-dev \
+    pngcrush optipng advancecomp pngquant jhead jpegoptim gifsicle libjpeg-progs unzip\
+    && curl -fsSL https://deb.nodesource.com/setup_24.x | bash - \
+    && apt-get install -y nodejs \
+    && npm install -g yarn svgo \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
 
-# Configure database.yml and secrets.yml
-RUN cp $workdir/config/example.database.yml $workdir/config/database.yml
-RUN touch $workdir/config/settings.local.yml
-RUN cp $workdir/config/example.storage.yml $workdir/config/storage.yml
-RUN echo "#session key \n\
-production: \n\
-  secret_key_base: $(rails secret)" > $workdir/config/secrets.yml
-# Protect sensitive information
-RUN chmod 600 $workdir/config/database.yml $workdir/config/secrets.yml
-RUN bundle exec bin/yarn install
 
-RUN rails i18n:js:export assets:precompile
+# Clone OSM Website
+ENV OPENSTREETMAP_WEBSITE_GITSHA=a244e419719ded592fb87e7ffd360f6e462a0d67
+ENV OSM_WEBSITE_URL=https://github.com/openstreetmap/openstreetmap-website/archive/${OPENSTREETMAP_WEBSITE_GITSHA}.zip
+RUN rm -rf $workdir/* && curl -fsSL $OSM_WEBSITE_URL -o /tmp/openstreetmap-website.zip && \
+    unzip /tmp/openstreetmap-website.zip -d /tmp && \
+    mv /tmp/openstreetmap-website-$OPENSTREETMAP_WEBSITE_GITSHA/* $workdir && \
+    rm -rf /tmp/*
 
-# The rack interface requires a `tmp` directory to use openstreetmap-cgimap
+RUN gem install bundler && \
+    bundle install && \
+    yarn install && \
+    bundle exec rake yarn:install
+
+# Dummy config for precompile
+RUN cp config/example.database.yml config/database.yml && \
+    cp config/example.storage.yml config/storage.yml && \
+    touch config/settings.local.yml && \
+    chmod 600 config/database.yml
+
+# Create dummy credentials
+RUN rm -f config/credentials.yml.enc && \
+    export RAILS_MASTER_KEY=$(openssl rand -hex 16) && \
+    export SECRET_KEY_BASE=$(bundle exec rails secret) && \
+    echo $RAILS_MASTER_KEY > config/master.key && \
+    EDITOR="echo" RAILS_MASTER_KEY=$RAILS_MASTER_KEY bundle exec rails credentials:edit && \
+    RAILS_MASTER_KEY=$RAILS_MASTER_KEY bundle exec rails runner "\
+    require 'active_support/encrypted_configuration'; \
+    require 'yaml'; \
+    creds = ActiveSupport::EncryptedConfiguration.new(\
+        config_path: 'config/credentials.yml.enc', \
+        key_path: 'config/master.key', \
+        env_key: 'RAILS_MASTER_KEY', \
+        raise_if_missing_key: true \
+    ); \
+    credentials = { secret_key_base: '$SECRET_KEY_BASE' }; \
+    creds.write(credentials.to_yaml); \
+    puts 'Credentials configured correctly.'"
+
+# Precompiling assets for production without requiring secret RAILS_MASTER_KEY
+RUN SECRET_KEY_BASE_DUMMY=1  \
+    bundle exec i18n export && \
+    bundle exec rails assets:precompile
+
+# Apply patches for OSM
+COPY patches/ /$workdir/
+RUN patch /$workdir/config/initializers/doorkeeper.rb /$workdir/config/initializers/doorkeeper.rb.patch
+
+
+FROM ruby:3.3-slim
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    workdir=/var/www \
+    BUNDLE_PATH=/usr/local/bundle \
+    GEM_HOME=/usr/local/bundle \
+    GEM_PATH=/usr/local/bundle \
+    PATH="/usr/local/bundle/bin:$PATH" \
+    RAILS_ENV=production \
+    PATH="$PATH:$GEM_HOME/bin"
+
+# Install base dependencies for Passenger gem compilation and runtime
+RUN BUILD_DEPS=" \
+    build-essential \
+    apache2-dev \
+    libcurl4-openssl-dev \
+    zlib1g-dev \
+    libssl-dev \
+    npm \
+    " \
+    && apt-get update && apt-get install -y --no-install-recommends \
+    $BUILD_DEPS \
+    libgd-dev \
+    apache2 \
+    libapache2-mod-fcgid \
+    libpq5 \
+    libxml2 \
+    libyaml-0-2 \
+    libarchive13 \
+    file \
+    pngcrush \
+    optipng \
+    advancecomp \
+    pngquant \
+    jhead \
+    jpegoptim \
+    gifsicle \
+    postgresql-client \
+    curl \
+    libvips \
+    nodejs \
+    \
+    && npm install -g svgo \
+    \
+    # Install Passenger as a gem and compile the Apache module
+    \
+    && gem install passenger --no-document \
+    && yes | passenger-install-apache2-module --auto --languages ruby \
+    && passenger-config validate-install --auto \
+    \
+    # Delete the build dependencies to reduce image size
+    \
+    && apt-get purge -y --auto-remove $BUILD_DEPS \
+    \
+    # libgd-dev is requiered by the app on run time to process gps files
+    \
+    && apt-get update && apt-get install -y --no-install-recommends libgd3 libgd-dev \
+    \
+    # Final cleanup
+    \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+
+# Apache configuration
+COPY config/production.conf /etc/apache2/sites-available/production.conf
+
+RUN passenger-install-apache2-module --snippet > /etc/apache2/mods-available/passenger.load && \
+    passenger-config build-native-support
+
+RUN a2enmod headers setenvif proxy proxy_http proxy_fcgi fcgid rewrite lbmethod_byrequests passenger && \
+    a2dissite 000-default && \
+    a2ensite production && \
+    echo "ServerName localhost" >> /etc/apache2/apache2.conf && \
+    apache2ctl configtest
+
+RUN echo '#!/bin/bash\nexec /usr/local/bin/ruby --yjit --yjit-exec-mem-size=64 "$@"' > /usr/local/bin/ruby_yjit && \
+    chmod +x /usr/local/bin/ruby_yjit
+    
+WORKDIR $workdir
+
+COPY --chown=www-data:www-data --from=builder /var/www /$workdir
+COPY --from=builder /usr/local/bundle /usr/local/bundle
+
+COPY config/settings.yml $workdir/config/
+COPY start.sh liveness.sh $workdir/
+
 RUN ln -s /tmp /var/www/tmp
 
-# Add Apache configuration file
-ADD config/production.conf /etc/apache2/sites-available/production.conf
-RUN a2enmod headers
-RUN a2enmod setenvif
-RUN a2dissite 000-default
-RUN a2ensite production
+RUN mkdir -p /var/www/log && \
+    touch /var/www/log/production.log && \
+    chown -R www-data:www-data /var/www/log /var/www/public && \
+    chown -R www-data:www-data /var/www
 
-# Install Passenger + Apache module
-RUN apt-key adv --refresh-keys --keyserver keyserver.ubuntu.com
-RUN apt-get update && apt-get install -y libapache2-mod-passenger lighttpd
-
-# Enable the Passenger Apache module and restart Apache
-RUN echo "ServerName $(cat /etc/hostname)" >> /etc/apache2/apache2.conf
-RUN a2enmod passenger
-
-# Check installation
-RUN /usr/bin/passenger-config validate-install
-RUN /usr/sbin/passenger-memory-stats
-
-# Enable required apache modules for the cgimap Apache service
-RUN a2enmod proxy proxy_http rewrite lbmethod_byrequests proxy_fcgi
-
-# Config the virtual host apache2
-RUN apache2ctl configtest
-
-# Set Permissions for www-data
-RUN chown -R www-data: $workdir
-
-# Add settings
-ADD config/settings.yml $workdir/config/
-
-COPY start.sh $workdir/
-COPY liveness.sh $workdir/
-
-CMD $workdir/start.sh
+CMD ["./start.sh"]
